@@ -8,3 +8,6 @@
 #include<sys/socket.h>
 #include<arpa/inet.h>
 #include<sys/wait.h>
+#include <unordered_map>
+#include <vector>
+#include<fstream>
