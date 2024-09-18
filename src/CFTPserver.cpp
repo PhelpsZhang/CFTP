@@ -1,14 +1,20 @@
 #include"CFTPserver.h"
 
 // temporarily, you can modify it!
-#define LOCAL_HOST "10.0.2.41"
-#define UDP_PORT 44044
+// #define LOCAL_HOST "10.24.178.58"
+// #define UDP_PORT 44044
 
-#define TARGET_HOST "10.0.1.99"
-#define TARGET_PORT 44044
+// #define TARGET_HOST "127.0.0.1"
+// #define TARGET_PORT 44044
 
 #include<iostream>
+#include <string>
+#include <cstdlib>
 
+struct ServerConfig {
+    std::string local_host;
+    int udp_port;
+};
 
 int checkParameter(int argc, char* argv[]) {
     // Show User input Parameters
@@ -18,9 +24,35 @@ int checkParameter(int argc, char* argv[]) {
     return 0;
 }
 
+ServerConfig parseArguments(int argc, char* argv[]) {
+    ServerConfig config;
+    config.local_host = "127.0.0.1";  // 默认值
+    config.udp_port = 44044;  // 默认值
+
+    for (int i = 1; i < argc; i += 2) {
+        std::string arg = argv[i];
+        if (i + 1 < argc) {
+            if (arg == "-h" || arg == "--host") {
+                config.local_host = argv[i + 1];
+            } else if (arg == "-p" || arg == "--port") {
+                config.udp_port = std::atoi(argv[i + 1]);
+            }
+        }
+    }
+
+    std::cout << "config:" << std::endl;
+    std::cout << "local host: " << config.local_host << std::endl;
+    std::cout << "UDP port: " << config.udp_port << std::endl;
+
+    return config;
+}
+
 int main(int argc, char* argv[]) {
     std::cout << "The Server begins running" << std::endl;
-
+    ServerConfig config = parseArguments(argc, argv);
+    const std::string& LOCAL_HOST = config.local_host;
+    const int& UDP_PORT = config.udp_port;
+    
     // Check input parameters.
     while (-1 == checkParameter(argc, argv)){};
 
@@ -36,7 +68,7 @@ int main(int argc, char* argv[]) {
     memset(&udp_sock_addr, 0, sizeof(udp_sock_addr));
     udp_sock_addr.sin_family = AF_INET;
     udp_sock_addr.sin_port = htons(UDP_PORT);
-    inet_pton(AF_INET, LOCAL_HOST, &(udp_sock_addr.sin_addr));
+    inet_pton(AF_INET, LOCAL_HOST.c_str(), &(udp_sock_addr.sin_addr));
 
     // 2. Bind UDP Socket
     if (-1 == bind(udp_socket_fd, (const struct sockaddr *)&udp_sock_addr, sizeof(udp_sock_addr))) {
