@@ -1,201 +1,231 @@
-#include"CFTPserver.h"
+#include "CFTPserver.h"
 
-// temporarily, you can modify it!
-#define LOCAL_HOST "10.0.2.41"
-#define UDP_PORT 44044
+// 定义服务器的最大传输单元（MTU）和每个数据块的大小
+#define SERVER_MTU 1400
+#define DATA_SIZE 1400
+#define WINDOW_SIZE 5  // 滑动窗口的大小
 
-#define TARGET_HOST "10.0.1.99"
-#define TARGET_PORT 44044
-
-#define CHUNK_SIZE 1400
-
-#include<iostream>
-
-struct Packet {
-    uint32_t packet_number;       // 包编号
-    std::vector<char> data;       // 数据
+// 定义握手结构体，包含文件名、文件大小、客户端MTU和CRC32校验值
+struct Handshake {
+    char filename[256];   // 文件名，最多256字符
+    long filesize;        // 文件大小（字节）
+    int mtu;              // 客户端的MTU
+    uint32_t crc32_hash;  // 用于校验文件的CRC32哈希值
 };
 
+// 定义数据块结构体，包含数据块序号和实际数据
+struct DataBlock {
+    int block_num;        // 数据块序号
+    char data[DATA_SIZE]; // 数据块内容，最大大小为1400字节
+};
 
-// 定义EOF标识符，表示传输结束的包编号
-const uint32_t EOF_PACKET_NUMBER = static_cast<uint32_t>(-1);
+// 定义ACK结构体，包含确认的最高序号和缺失包的位图
+struct Ack {
+    int highest_received_block;    // 已确认的最高数据块序号
+    bool missing_blocks[WINDOW_SIZE];  // 缺失数据包的位图，表示哪些包没有收到
+};
 
-int checkParameter(int argc, char* argv[]) {
-    // Show User input Parameters
-    for (int i = 0; i < argc; ++i) {
-        std::cout << "Argument " << i << ": " << argv[i] << std::endl;
+// CRC32查找表，用于加速CRC32校验的计算
+uint32_t crc32_table[256];
+
+// 初始化CRC32查找表，使用CRC32的多项式生成每个字节的校验值
+void init_crc32_table() {
+    uint32_t polynomial = 0xEDB88320; // CRC32 多项式
+    for (uint32_t i = 0; i < 256; i++) {
+        uint32_t crc = i;
+        for (uint32_t j = 8; j > 0; j--) {
+            if (crc & 1) {
+                crc = (crc >> 1) ^ polynomial; // 如果最低位为1，进行异或运算
+            } else {
+                crc >>= 1; // 否则直接右移
+            }
+        }
+        crc32_table[i] = crc;
     }
-    return 0;
 }
 
-int write_to_file(std::ofstream& output_file, Packet packet) {
-    std::cout << "write packet_number " << packet.packet_number << std::endl;
-    // while (received_chunks.find(next_expected_packet) != received_chunks.end()) {
-    if (packet.packet_number != EOF_PACKET_NUMBER){
-        const std::vector<char>& chunk_data = packet.data;
-        output_file.write(chunk_data.data(), chunk_data.size());
+// 计算单个数据块的CRC32校验值，使用查找表进行加速
+uint32_t calculate_crc32(const std::vector<char>& data, uint32_t crc = 0xFFFFFFFF) {
+    for (size_t i = 0; i < data.size(); i++) {
+        uint8_t byte = data[i]; // 获取数据的每一个字节
+        crc = (crc >> 8) ^ crc32_table[(crc ^ byte) & 0xFF]; // 查表并更新CRC值
     }
-    return 0;
+    return crc;
 }
 
-// 接收握手消息并发送确认
-bool perform_handshake(int sockfd) {
-    const int BUFFER_SIZE = 1024;
-    char buffer[BUFFER_SIZE];
-    struct sockaddr_in client_addr;
-    socklen_t addr_len = sizeof(client_addr);
-
-    // 接收握手消息
-    ssize_t bytes_received = recvfrom(sockfd, buffer, BUFFER_SIZE, 0,
-                                      reinterpret_cast<struct sockaddr*>(&client_addr), &addr_len);
-    if (bytes_received < 0) {
-        std::cerr << "Error receiving handshake message." << std::endl;
-        return false;
+// 计算整个文件的CRC32校验值
+uint32_t calculate_file_crc32(const std::string& file_path) {
+    std::ifstream file(file_path, std::ios::binary); // 打开文件以二进制模式读取
+    if (!file.is_open()) {
+        std::cerr << "无法打开文件: " << file_path << std::endl;
+        return 0;
     }
-    buffer[bytes_received] = '\0';  // 确保字符串以空字符结束
-    std::cout << "Received handshake message: " << buffer << std::endl;
 
-    // 发送握手确认消息
-    char ack_message[] = "ACK";
-    ssize_t bytes_sent = sendto(sockfd, ack_message, strlen(ack_message), 0,
-                                reinterpret_cast<const struct sockaddr*>(&client_addr), addr_len);
-    if (bytes_sent < 0) {
-        std::cerr << "Error sending handshake confirmation." << std::endl;
-        return false;
+    init_crc32_table(); // 初始化CRC32查找表
+
+    uint32_t crc = 0xFFFFFFFF; // 初始值
+    std::vector<char> buffer(4096); // 每次读取4KB数据
+
+    while (file.good()) {
+        file.read(buffer.data(), buffer.size()); // 从文件中读取数据
+        std::streamsize bytes_read = file.gcount(); // 获取实际读取的字节数
+        if (bytes_read > 0) {
+            buffer.resize(bytes_read); // 调整缓冲区大小以适应读取的数据量
+            crc = calculate_crc32(buffer, crc); // 更新CRC32校验值
+        }
     }
-    std::cout << "Handshake confirmation sent." << std::endl;
 
-    return true;
+    return crc ^ 0xFFFFFFFF; // 返回最终的CRC32校验值
 }
 
+// 服务器程序的主函数
 int main(int argc, char* argv[]) {
-    std::cout << "The Server begins running" << std::endl;
-
-    // Check input parameters.
-    while (-1 == checkParameter(argc, argv)){};
-
-    // 获取用户主目录
-    const char* home_dir = std::getenv("HOME");
-    if (home_dir == nullptr) {
-        std::cerr << "Error: Could not get home directory." << std::endl;
+    if (argc != 2) {
+        std::cerr << "Usage: " << argv[0] << " <port>" << std::endl;
         return -1;
     }
 
-    // 暂时写死类型。之后文件类型等元数据要从client传过来
-    std::string output_file_path = std::string(home_dir) + "/output_file.bin";
+    int port = atoi(argv[1]); // 从命令行参数中获取端口号
 
-    // 1. Create udp Socket
-    int udp_socket_fd = socket(AF_INET, SOCK_DGRAM, 0);
-    if (-1 == udp_socket_fd) {
-        std::cerr << "UDP socket create failed." << std::endl;
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+    int sockfd; // 服务器的socket文件描述符
+    struct sockaddr_in servaddr, cliaddr; // 服务器和客户端的地址结构
+    Handshake handshake; // 握手信息
+    DataBlock block; // 数据块
+    Ack ack; // ACK确认信息
+
+    // 创建UDP socket
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        std::cerr << "Socket creation failed." << std::endl;
         return -1;
     }
-    
-    // build the udp socket struct sockaddr_in
-    sockaddr_in udp_sock_addr;
-    memset(&udp_sock_addr, 0, sizeof(udp_sock_addr));
-    udp_sock_addr.sin_family = AF_INET;
-    udp_sock_addr.sin_port = htons(UDP_PORT);
-    inet_pton(AF_INET, LOCAL_HOST, &(udp_sock_addr.sin_addr));
 
-    // 2. Bind UDP Socket
-    if (-1 == bind(udp_socket_fd, (const struct sockaddr *)&udp_sock_addr, sizeof(udp_sock_addr))) {
-        std::cerr << "UDP Socket bind Failed." << std::endl;
-        close(udp_socket_fd);
+    // 服务器地址初始化
+    memset(&servaddr, 0, sizeof(servaddr));
+    servaddr.sin_family = AF_INET; // 使用IPv4协议
+    servaddr.sin_addr.s_addr = INADDR_ANY; // 接受来自任意地址的连接
+    servaddr.sin_port = htons(port); // 设置服务器的端口号
+
+    // 绑定socket到指定的端口
+    if (bind(sockfd, (const struct sockaddr*)&servaddr, sizeof(servaddr)) < 0) {
+        std::cerr << "Bind failed." << std::endl;
         return -1;
     }
-    std::cout << "UDP Bind Successful!" << std::endl;
 
-    // build remote target udp sockaddr struct
-    sockaddr_in target_udp_sock_addr;
-    memset(&target_udp_sock_addr, 0, sizeof(target_udp_sock_addr));
-    // target_udp_sock_addr.sin_family = AF_INET;
-    // target_udp_sock_addr.sin_port = htons(TARGET_PORT);
-    // inet_pton(AF_INET, TARGET_HOST, &(target_udp_sock_addr.sin_addr));
-    socklen_t tsocklen = sizeof(target_udp_sock_addr);
-    
-    
-    // perform handshake
-    if (!perform_handshake(udp_socket_fd)) {
-        std::cerr << "Handshake failed. Exiting." << std::endl;
-        close(udp_socket_fd);
+    socklen_t len = sizeof(cliaddr); // 客户端地址长度
+
+    // 接收客户端的握手信息，包含文件名、文件大小等
+    recvfrom(sockfd, &handshake, sizeof(handshake), 0, (struct sockaddr*)&cliaddr, &len);
+    std::cout << "Handshake received: " << std::endl;
+    std::cout << "Filename: " << handshake.filename << std::endl;
+    std::cout << "Filesize: " << handshake.filesize << std::endl;
+    std::cout << "Client MTU: " << handshake.mtu << std::endl;
+
+    // 确定使用的最小MTU
+    int agreed_mtu = std::min(SERVER_MTU, handshake.mtu);
+    std::cout << "Agreed MTU: " << agreed_mtu << std::endl;
+
+    // 计算文件需要传输的总数据块数
+    int total_blocks = (handshake.filesize + agreed_mtu - 1) / agreed_mtu;
+    std::cout << "Total blocks to receive: " << total_blocks << std::endl;
+
+    // 将协商好的MTU发送回客户端
+    sendto(sockfd, &agreed_mtu, sizeof(agreed_mtu), 0, (struct sockaddr*)&cliaddr, len);
+
+    // 创建一个临时文件来保存接收到的数据
+    std::string millis_str = std::to_string(millis);
+    std::string temp_file_name = "received_file" + millis_str;
+    std::ofstream file(temp_file_name, std::ios::binary);
+    if (!file.is_open()) {
+        std::cerr << "Failed to open output file." << std::endl;
+        close(sockfd);
         return -1;
     }
-    
-    /*
-    receive the file
-    */
-    // open output file
-    std::ofstream output_file(output_file_path, std::ios::binary);
-    
-    // Use an unordered_map to store the received data
-    // key: packet_number, value: chunk data
-    std::unordered_map<uint32_t, std::vector<char>> received_chunks;
-    // std::queue<Packet> packet_queue;  // 用于存储数据包的队列
-    
-    uint32_t next_expected_packet = 0;
 
-    // buffer to receive data
-    char buffer[CHUNK_SIZE + sizeof(uint32_t)];
+    int expected_seq_num = 0; // 期望的下一个数据块序号
+    std::map<int, std::string> buffer; // 缓存乱序到达的包
+    int received_count = 0; // 计数器，用于控制发送ACK的频率
 
-    std::cout << "start receiving data" << std::endl;
     while (true) {
-        // receive data
-        ssize_t bytes_received = recvfrom(udp_socket_fd, buffer, sizeof(buffer), 0, nullptr, nullptr);
-        if (bytes_received < 0) {
-            std::cerr << "Error receiving packet." << std::endl;
+        memset(block.data, 0, sizeof(block.data)); // 清空数据缓冲区
+        int n = recvfrom(sockfd, &block, sizeof(block), 0, (struct sockaddr*)&cliaddr, &len);
+
+        // 如果接收到期望的包，按顺序写入文件
+        if (block.block_num == expected_seq_num) {
+            std::cout << "Received expected block " << block.block_num << std::endl;
+            file.write(block.data, n - sizeof(block.block_num)); // 写入数据
+            expected_seq_num++;
+            received_count++;
+
+            // 检查缓存中是否有后续的数据包
+            while (buffer.count(expected_seq_num)) {
+                std::cout << "Writing buffered block " << expected_seq_num << std::endl;
+                file.write(buffer[expected_seq_num].c_str(), agreed_mtu); // 从缓存写入数据
+                buffer.erase(expected_seq_num);
+                expected_seq_num++;
+                received_count++;
+            }
+        } else if (block.block_num > expected_seq_num) {
+            // 如果接收到的包序号大于期望的，缓存该包
+            std::cout << "Buffered out-of-order block " << block.block_num << std::endl;
+            buffer[block.block_num] = std::string(block.data, n - sizeof(block.block_num));
+        }
+
+        // 检查是否已经收到最后一个数据包
+        if (block.block_num == total_blocks - 1) {
+            std::cout << "Received last block (" << block.block_num << "). Sending ACK." << std::endl;
+
+            // 构建最后的ACK并发送
+            ack.highest_received_block = block.block_num;
+            memset(ack.missing_blocks, 0, sizeof(ack.missing_blocks)); // 没有缺失块
+            sendto(sockfd, &ack, sizeof(ack), 0, (struct sockaddr*)&cliaddr, len);
+
+            std::cout << "File transfer completed." << std::endl;
             break;
         }
 
-        // get packet_number
-        uint32_t packet_number;
-        memcpy(&packet_number, buffer, sizeof(packet_number));
-        std::cout << "Received packet_number" << packet_number << std::endl;
+        // 每收到WINDOW_SIZE个包后发送ACK
+        if (received_count >= WINDOW_SIZE) {
+            ack.highest_received_block = expected_seq_num - 1; // 收到的最高序号
 
-        // check if it is EOF packet_number
-        if (packet_number == EOF_PACKET_NUMBER) {
-            std::cout << "Received EOF packet. Transmission complete." << std::endl;
-            break;
+            // 设置ACK中的缺失块信息
+            memset(ack.missing_blocks, 0, sizeof(ack.missing_blocks));
+            for (int i = 0; i < WINDOW_SIZE; i++) {
+                if (buffer.count(expected_seq_num + i) == 0) {
+                    ack.missing_blocks[i] = true;  // 标记为缺失包
+                }
+            }
+
+            // 发送ACK给客户端
+            sendto(sockfd, &ack, sizeof(ack), 0, (struct sockaddr*)&cliaddr, len);
+            std::cout << "Sent ACK for block " << ack.highest_received_block << std::endl;
+
+            // 重置计数器
+            received_count = 0;
         }
+    }
 
-        
-        // get Data
-        size_t data_size = bytes_received - sizeof(packet_number);
-        std::vector<char> chunk_data(buffer + sizeof(packet_number), buffer + sizeof(packet_number) + data_size);
+    file.close();
+    close(sockfd);
 
-        // store the chunk data
-        // std::move() lvalue -> rvalue, avoid unnecessary copy.
-        // received_chunks[packet_number] = std::move(chunk_data);
-
-        // 将包编号和数据存入队列
-        Packet packet;
-        packet.packet_number = packet_number;
-        packet.data.assign(buffer + sizeof(packet_number), buffer + bytes_received);
-
-        // packet_queue.push(packet);  // 将接收到的包放入队列
-        // std::cout << "Stored packet #" << packet_number << " in queue." << std::endl;
-        //
-        if (!output_file.is_open()) {
-            std::cerr << "Error: Could not open file " << output_file_path << " for writing." << std::endl;
-            return -1;
+    // 文件传输完成后，将临时文件重命名为正确的文件名，并验证CRC32校验
+    if (std::rename(temp_file_name.c_str(), handshake.filename) == 0) {
+        uint32_t crc32_hash = calculate_file_crc32(handshake.filename);
+        std::cout << "File renamed successfully to " << handshake.filename << std::endl;
+        std::cout << "Origin whole file's CRC32 is " << handshake.crc32_hash << std::endl;
+        std::cout << "Copied file's CRC32 is " << crc32_hash << std::endl;
+        if (crc32_hash == handshake.crc32_hash) {
+            std::cout << "恭喜！文件校验通过！" << std::endl;
+        } else {
+            std::cout << "遗憾！文件校验失败！继续Debug！" << std::endl;
         }
-        write_to_file(output_file, packet);  
+    } else {
+        std::perror("Error renaming file");
     }
-    // close the output file
-    output_file.close();
-    std::cout << "The receiver has already received all file data and write it to file." << std::endl;
 
-    std::string send_back_message = "Thank you, I got that!";
-    // Send back messgae to server.
-    if (-1 == sendto(udp_socket_fd, send_back_message.data(), send_back_message.length(), 0,
-             (const struct sockaddr *) &target_udp_sock_addr, tsocklen)) {
-        std::cerr << "Failed to send data via UDP. " << std::endl;
-        close(udp_socket_fd);
-        return -1;
-    }
-    std::cout << "The Server has sent the back Message to the Client." << std::endl;
-    
-    close(udp_socket_fd);
-    std::cout << "The Server Ends." << std::endl;
     return 0;
 }

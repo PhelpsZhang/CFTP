@@ -1,13 +1,10 @@
-#include<stdio.h>
-#include<stdlib.h>
-#include<unistd.h>
-#include<string.h>
-#include<netdb.h>
-#include<sys/types.h>
-#include<netinet/in.h>
-#include<sys/socket.h>
-#include<arpa/inet.h>
-#include<sys/wait.h>
-#include <unordered_map>
-#include <vector>
-#include<fstream>
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <unistd.h>
+#include <cstdlib>
+#include <chrono>
+#include <map>

@@ -1,29 +1,18 @@
+# Makefile for UDP Client and Server
+
 CXX = g++
 CXXFLAGS = -Wall -std=c++11
 
-# source file
-CLIENT_SRC = CFTPclient.cpp
-SERVER_SRC = CFTPserver.cpp
+CLIENT = CFTPclient
+SERVER = CFTPserver
 
-# header file
-CLIENT_HDR = CFTPclient.h
-SERVER_HDR = CFTPserver.h
+all: $(CLIENT) $(SERVER)
 
-# executable file
-CLIENT_EXEC = CFTPclient
-SERVER_EXEC = CFTPserver
+$(CLIENT): CFTPclient.cpp
+	$(CXX) $(CXXFLAGS) -o $(CLIENT) CFTPclient.cpp
 
-# generate all
-all: $(CLIENT_EXEC) $(SERVER_EXEC)
+$(SERVER): CFTPserver.cpp
+	$(CXX) $(CXXFLAGS) -o $(SERVER) CFTPserver.cpp
 
-# Client 
-$(CLIENT_EXEC): $(CLIENT_SRC) $(CLIENT_HDR)
-	$(CXX) $(CXXFLAGS) -o $(CLIENT_EXEC) $(CLIENT_SRC)
-
-# Server
-$(SERVER_EXEC): $(SERVER_SRC) $(SERVER_HDR)
-	$(CXX) $(CXXFLAGS) -o $(SERVER_EXEC) $(SERVER_SRC)
-
-# clean 
 clean:
-	rm -f $(CLIENT_EXEC) $(SERVER_EXEC)
+	rm -f $(CLIENT) $(SERVER)
