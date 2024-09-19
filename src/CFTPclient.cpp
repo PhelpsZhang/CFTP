@@ -2,7 +2,7 @@
 
 #define DATA_SIZE 1400
 #define WINDOW_SIZE 5 // 滑动窗口大小
-#define TIMEOUT 2     // 超时重传时间（秒）
+#define TIMEOUT 20000     // 超时重传时间（us）
 
 // 定义握手结构体，用于在传输前与服务器交换信息
 struct Handshake
@@ -185,12 +185,20 @@ int main(int argc, char *argv[])
     while (base * agreed_mtu < filesize)
     {
         // 在窗口内发送数据包
+        std::cout << "****************************" << std::endl;
+        std::cout << "Before send, next_seq_num is " << next_seq_num << std::endl;
+        std::cout << "base+WINDOW_SIZE:" << base+WINDOW_SIZE << std::endl;
+        // std::cout << "next_seq_num * agreed_mtu:" << next_seq_num * agreed_mtu << std::endl;
+        std::cout << "****************************" << std::endl;
         while (next_seq_num < base + WINDOW_SIZE && next_seq_num * agreed_mtu < filesize)
         {
+
+            std::cout << "before seekg, move pointer to : " << next_seq_num*agreed_mtu << std::endl;
             file.seekg(next_seq_num * agreed_mtu); // 移动文件读取指针到相应位置
 
             // 计算本次读取的数据大小，最后一个数据块可能小于MTU
             int bytes_to_read = std::min(agreed_mtu, static_cast<int>(filesize - next_seq_num * agreed_mtu));
+            std::cout << "before file read, bytes_to_read:" << bytes_to_read << std::endl;
             file.read(block.data, bytes_to_read); // 读取数据到数据块
             std::streamsize bytes_read = file.gcount(); // 实际读取的字节数
 
@@ -200,21 +208,43 @@ int main(int argc, char *argv[])
             next_seq_num++; // 序号加1
         }
 
+        std::cout << "********* Out Window send while loop*********" << std::endl;
+
         // 使用 select 函数等待ACK或超时处理
         fd_set readfds;
         FD_ZERO(&readfds);
         FD_SET(sockfd, &readfds);
 
         struct timeval timeout;
-        timeout.tv_sec = TIMEOUT; // 设置超时时间
-        timeout.tv_usec = 0;
+        timeout.tv_sec = 0; // 设置超时时间
+        timeout.tv_usec = TIMEOUT;  // 20ms
+
+        // 获取当前时间点
+        auto now = std::chrono::system_clock::now();
+        // 将时间点转换为 time_t 类型
+        std::time_t currentTime = std::chrono::system_clock::to_time_t(now);
+
+        // 打印当前时间（格式化输出）debug用
+        std::cout << "Current time: " << std::ctime(&currentTime);
+        std::cout << "timeout.tv_usec:" << timeout.tv_usec << std::endl;
+        if (sockfd < 0) {
+            std::cerr << "Invalid socket file descriptor" << std::endl;
+            return -1;
+        }
 
         int result = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
+        std::cout << "select return result:" << result << std::endl;
+
         if (result > 0 && FD_ISSET(sockfd, &readfds))
         {
             // 收到ACK
             recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&servaddr, &len);
-            std::cout << "ACK received. Highest received block: " << ack.highest_received_block << std::endl;
+            std::cout << "******************ACK received****************" << std::endl;
+            std::cout << "ack.highest_received_block:"  << ack.highest_received_block << std::endl; 
+            std::cout << "missing_blocks bool array: ";
+            for(int i=0;i<sizeof(ack.missing_blocks);i++){
+                std::cout<<ack.missing_blocks[i] << ",";
+            }
 
             // 更新窗口起始序号
             if (ack.highest_received_block >= base) {
@@ -246,6 +276,7 @@ int main(int argc, char *argv[])
             std::cout << "Timeout: resending window from base " << base << std::endl;
             for (int i = base; i < next_seq_num; i++)
             {
+                std::cout << "for-resend porition I:" << i << " while next_seq_num is " << next_seq_num << std::endl;
                 file.seekg(i * agreed_mtu); // 定位到相应位置
                 int bytes_to_read = std::min(agreed_mtu, static_cast<int>(filesize - i * agreed_mtu));
                 file.read(block.data, bytes_to_read);
