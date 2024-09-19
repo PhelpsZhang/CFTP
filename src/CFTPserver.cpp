@@ -17,6 +17,7 @@ struct Handshake {
 struct DataBlock {
     int block_num;        // 数据块序号
     char data[DATA_SIZE]; // 数据块内容，最大大小为1400字节
+    uint32_t crc32;       // 数据块的CRC32校验值
 };
 
 // 定义ACK结构体，包含确认的最高序号和缺失包的位图
@@ -74,6 +75,18 @@ uint32_t calculate_file_crc32(const std::string& file_path) {
             crc = calculate_crc32(buffer, crc); // 更新CRC32校验值
         }
     }
+
+    return crc ^ 0xFFFFFFFF; // 返回最终的CRC32校验值
+}
+
+// 计算数据块的CRC32校验值
+uint32_t calculate_block_crc32(const char* data, size_t length) {
+    init_crc32_table(); // 初始化CRC32查找表
+
+    uint32_t crc = 0xFFFFFFFF; // 初始值
+    std::vector<char> buffer(data, data + length); // 将数据块转换为vector
+
+    crc = calculate_crc32(buffer, crc); // 计算CRC32校验值
 
     return crc ^ 0xFFFFFFFF; // 返回最终的CRC32校验值
 }
@@ -157,12 +170,21 @@ int main(int argc, char* argv[]) {
         // 只要来了数据包就该++count，不然无法触发当前的ACK策略
         received_count++;
 
+        // 计算接收到的数据块的CRC32校验值
+        uint32_t received_crc32 = calculate_block_crc32(block.data, n - sizeof(block.block_num) - sizeof(block.crc32));
+
+        // 校验数据块的CRC32值
+        if (received_crc32 != block.crc32) {
+            std::cerr << "CRC32 mismatch for block " << block.block_num << ". Expected: " << block.crc32 << ", Received: " << received_crc32 << std::endl;
+            continue; // 忽略该数据块
+        }
+
         std::cout << "expected_seq_num:" << expected_seq_num << std::endl;
         std::cout << "block.block_num:" << block.block_num << std::endl;
         // 如果接收到期望的包，按顺序写入文件
         if (block.block_num == expected_seq_num) {
             std::cout << "Received expected block " << block.block_num << std::endl;
-            file.write(block.data, n - sizeof(block.block_num)); // 写入数据
+            file.write(block.data, n - sizeof(block.block_num) - sizeof(block.crc32)); // 写入数据
             expected_seq_num++;
 
             // 检查缓存中是否有后续的数据包
@@ -176,7 +198,8 @@ int main(int argc, char* argv[]) {
         } else if (block.block_num > expected_seq_num) {
             // 如果接收到的包序号大于期望的，缓存该包
             std::cout << "Buffered out-of-order block " << block.block_num << std::endl;
-            buffer[block.block_num] = std::string(block.data, n - sizeof(block.block_num));
+            buffer[block.block_num] = std::string(block.data, n - sizeof(block.block_num) - sizeof(block.crc32));
+            
         }
         
         // 检查是否已经收到最后一个数据包

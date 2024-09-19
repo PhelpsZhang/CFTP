@@ -18,6 +18,7 @@ struct DataBlock
 {
     int block_num;         // 数据块的序号
     char data[DATA_SIZE];  // 实际数据内容，最大1400字节
+    uint32_t crc32;        // 数据块的CRC32校验值
 };
 
 // 定义ACK结构体，用于服务器反馈确认信息
@@ -53,7 +54,7 @@ std::string getFileName(const std::string &filePath)
 bool send_packet(int sockfd, DataBlock &block, int data_size, struct sockaddr_in &servaddr, socklen_t len)
 {
     // 发送数据块，包括块序号和实际数据
-    return sendto(sockfd, &block, sizeof(block.block_num) + data_size, 0, (struct sockaddr *)&servaddr, len) > 0;
+    return sendto(sockfd, &block, sizeof(block.block_num) + data_size + sizeof(block.crc32), 0, (struct sockaddr *)&servaddr, len) > 0;
 }
 
 // 预先计算 CRC32 查找表
@@ -108,6 +109,18 @@ uint32_t calculate_file_crc32(const std::string& file_path) {
 
     return crc ^ 0xFFFFFFFF; // 返回最终的CRC32校验值
 }
+// 计算数据块的CRC32校验值
+uint32_t calculate_block_crc32(const char* data, size_t length) {
+    init_crc32_table(); // 初始化CRC32查找表
+
+    uint32_t crc = 0xFFFFFFFF; // 初始值
+    std::vector<char> buffer(data, data + length); // 将数据块转换为vector
+
+    crc = calculate_crc32(buffer, crc); // 计算CRC32校验值
+
+    return crc ^ 0xFFFFFFFF; // 返回最终的CRC32校验值
+}
+
 
 // 主函数，客户端程序入口
 int main(int argc, char *argv[])
@@ -203,6 +216,11 @@ int main(int argc, char *argv[])
             std::streamsize bytes_read = file.gcount(); // 实际读取的字节数
 
             block.block_num = next_seq_num; // 设置数据块序号
+
+            std::vector<char> data_vector(block.data, block.data + bytes_read);
+            block.crc32 = calculate_block_crc32(block.data, bytes_read);
+            
+            
             send_packet(sockfd, block, bytes_read, servaddr, len); // 发送数据包
             std::cout << "Sent block " << block.block_num << " with " << bytes_read << " bytes." << std::endl;
             next_seq_num++; // 序号加1
@@ -264,11 +282,16 @@ int main(int argc, char *argv[])
                         file.read(block.data, bytes_to_read);
                         std::streamsize bytes_read = file.gcount();
                         block.block_num = seq_num_to_resend;
+
+                        // 计算数据块的CRC32校验值
+                        std::vector<char> data_vector(block.data, block.data + bytes_read);
+                        block.crc32 = calculate_crc32(data_vector);
+
                         send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
-                        std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes due to missing." << std::endl;
-                    }
+                        std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes and CRC32: " << block.crc32 << " due to missing." << std::endl;
                 }
             }
+        }
         }
         else if (result == 0)
         {
