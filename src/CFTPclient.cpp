@@ -1,7 +1,7 @@
 #include "CFTPclient.h"
 
 #define DATA_SIZE 1400
-#define WINDOW_SIZE 5 // 滑动窗口大小
+#define WINDOW_SIZE 100 // 滑动窗口大小
 #define TIMEOUT 20000     // 超时重传时间（us）
 
 // 定义握手结构体，用于在传输前与服务器交换信息
@@ -308,18 +308,20 @@ int main(int argc, char *argv[])
         {
             // 超时处理，重传窗口内的所有包
             std::cout << "Timeout: resending window from base " << base << std::endl;
-            for (int i = base; i < next_seq_num; i++)
-            {
-                std::cout << "for-resend porition I:" << i << " while next_seq_num is " << next_seq_num << std::endl;
-                file.seekg(i * agreed_mtu); // 定位到相应位置
-                int bytes_to_read = std::min(agreed_mtu, static_cast<int>(filesize - i * agreed_mtu));
-                file.read(block.data, bytes_to_read);
-                std::streamsize bytes_read = file.gcount();
-                block.block_num = i;
-                send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
-                resent_count++;
-                std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes due to timeout." << std::endl;
-            }
+            // We don't have to deal with it separately, just update the value and deliever it to while loop
+            next_seq_num = base;
+            // for (int i = base; i < next_seq_num; i++)
+            // {
+            //     std::cout << "for-resend porition I:" << i << " while next_seq_num is " << next_seq_num << std::endl;
+            //     file.seekg(i * agreed_mtu); // 定位到相应位置
+            //     int bytes_to_read = std::min(agreed_mtu, static_cast<int>(filesize - i * agreed_mtu));
+            //     file.read(block.data, bytes_to_read);
+            //     std::streamsize bytes_read = file.gcount();
+            //     block.block_num = i;
+            //     send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
+            //     resent_count++;
+            //     std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes due to timeout." << std::endl;
+            // }
         }
         else
         {

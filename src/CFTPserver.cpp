@@ -3,7 +3,7 @@
 // 定义服务器的最大传输单元（MTU）和每个数据块的大小
 #define SERVER_MTU 1400
 #define DATA_SIZE 1400
-#define WINDOW_SIZE 5  // 滑动窗口的大小
+#define WINDOW_SIZE 100  // 滑动窗口的大小
 
 // 定义握手结构体，包含文件名、文件大小、客户端MTU和CRC32校验值
 struct Handshake {
