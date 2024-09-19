@@ -2,7 +2,8 @@
 
 #define DATA_SIZE 1400
 #define WINDOW_SIZE 100 // 滑动窗口大小
-#define TIMEOUT 20000     // 超时重传时间（us）
+#define TIMEOUT 20    // 超时重传时间（ms）
+#define MAX_EVENTS 10  // 最大事件数
 
 // 定义握手结构体，用于在传输前与服务器交换信息
 struct Handshake
@@ -204,6 +205,26 @@ int main(int argc, char *argv[])
     int next_seq_num = 0; // 下一个要发送的数据块序号
     socklen_t len = sizeof(servaddr);
 
+    // 创建 epoll 实例
+    int epfd = epoll_create1(0);  // 参数为 0 表示默认行为
+    if (epfd == -1) {
+        std::cerr << "Failed to create epoll instance: " << strerror(errno) << std::endl;
+        close(sockfd);
+        return -1;
+    }
+
+    // 注册套接字到 epoll 实例，监听 EPOLLIN 事件（可读事件）
+    struct epoll_event ev, events[MAX_EVENTS];
+    ev.events = EPOLLIN;  // 可读事件
+    ev.data.fd = sockfd;  // 套接字描述符
+
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) == -1) {
+        std::cerr << "Failed to add socket to epoll: " << strerror(errno) << std::endl;
+        close(epfd);
+        close(sockfd);
+        return -1;
+    }
+
     while (base * agreed_mtu < filesize)
     {
         // 在窗口内发送数据包
@@ -238,14 +259,6 @@ int main(int argc, char *argv[])
 
         std::cout << "********* Out Window send while loop*********" << std::endl;
 
-        // 使用 select 函数等待ACK或超时处理
-        fd_set readfds;
-        FD_ZERO(&readfds);
-        FD_SET(sockfd, &readfds);
-
-        struct timeval timeout;
-        timeout.tv_sec = 0; // 设置超时时间
-        timeout.tv_usec = TIMEOUT;  // 20ms
 
         // 获取当前时间点
         auto now = std::chrono::system_clock::now();
@@ -254,17 +267,21 @@ int main(int argc, char *argv[])
 
         // 打印当前时间（格式化输出）debug用
         std::cout << "Current time: " << std::ctime(&currentTime);
-        std::cout << "timeout.tv_usec:" << timeout.tv_usec << std::endl;
-        if (sockfd < 0) {
-            std::cerr << "Invalid socket file descriptor" << std::endl;
-            return -1;
+
+        int nfds = epoll_wait(epfd, events, MAX_EVENTS, TIMEOUT);
+        std::cout << "epoll_wait return result:" << nfds << std::endl;
+
+        if (nfds == -1) {
+            std::cerr << "Error in epoll_wait: " << strerror(errno) << std::endl;
+            break;
         }
 
-        int result = select(sockfd + 1, &readfds, NULL, NULL, &timeout);
-        std::cout << "select return result:" << result << std::endl;
-
-        if (result > 0 && FD_ISSET(sockfd, &readfds))
-        {
+        if (nfds == 0) {
+            // 超时处理：重传窗口内的所有包
+            std::cout << "Timeout: retransmitting all packets in window." << std::endl;
+            // 这里是超时处理逻辑，可以执行重传操作
+            next_seq_num = base;
+        } else {
             // 收到ACK
             recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&servaddr, &len);
             std::cout << "******************ACK received****************" << std::endl;
@@ -300,34 +317,9 @@ int main(int argc, char *argv[])
                         send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
                         resent_count++;
                         std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes and CRC32: " << block.crc32 << " due to missing." << std::endl;
+                    }
                 }
             }
-        }
-        }
-        else if (result == 0)
-        {
-            // 超时处理，重传窗口内的所有包
-            std::cout << "Timeout: resending window from base " << base << std::endl;
-            // We don't have to deal with it separately, just update the value and deliever it to while loop
-            next_seq_num = base;
-            // for (int i = base; i < next_seq_num; i++)
-            // {
-            //     std::cout << "for-resend porition I:" << i << " while next_seq_num is " << next_seq_num << std::endl;
-            //     file.seekg(i * agreed_mtu); // 定位到相应位置
-            //     int bytes_to_read = std::min(agreed_mtu, static_cast<int>(filesize - i * agreed_mtu));
-            //     file.read(block.data, bytes_to_read);
-            //     std::streamsize bytes_read = file.gcount();
-            //     block.block_num = i;
-            //     send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
-            //     resent_count++;
-            //     std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes due to timeout." << std::endl;
-            // }
-        }
-        else
-        {
-            // select 函数出错
-            std::cerr << "Error in select." << std::endl;
-            break;
         }
     }
 
