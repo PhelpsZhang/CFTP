@@ -16,8 +16,8 @@ struct Handshake {
 // 定义数据块结构体，包含数据块序号和实际数据
 struct DataBlock {
     int block_num;        // 数据块序号
+    uint32_t crc32;       // 数据块的CRC32校验值 注意，这一行原本是在data数组下面的，但是由于data数组长度不定，万一包大小不是MTU，那么就可能被提前截断而读不到了。因此，我们不得不挪到data上面来。
     char data[DATA_SIZE]; // 数据块内容，最大大小为1400字节
-    uint32_t crc32;       // 数据块的CRC32校验值
 };
 
 // 定义ACK结构体，包含确认的最高序号和缺失包的位图
@@ -159,19 +159,20 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    int expected_seq_num = 0; // 期望的下一个数据块序号
+   int expected_seq_num = 0; // 期望的下一个数据块序号
     std::map<int, std::string> buffer; // 缓存乱序到达的包
     int received_count = 0; // 计数器，用于控制发送ACK的频率
 
     while (true) {
         memset(block.data, 0, sizeof(block.data)); // 清空数据缓冲区
+        block.crc32=888; //注意，上面那一行我们用memset清空了数据缓冲区。但是，crc32这个字段并没有被清空。为了清空，我们赋任意值即可。赋值888仅仅为了能够帮助我们快速锁定问题，没有特殊含义。
         int n = recvfrom(sockfd, &block, sizeof(block), 0, (struct sockaddr*)&cliaddr, &len);
-        
         // 只要来了数据包就该++count，不然无法触发当前的ACK策略
         received_count++;
 
         // 计算接收到的数据块的CRC32校验值
         uint32_t received_crc32 = calculate_block_crc32(block.data, n - sizeof(block.block_num) - sizeof(block.crc32));
+        std::cout << "收到数据包了！包号：" << block.block_num << "预期CRC32：" << block.crc32 << "实际CRC32:" << received_crc32  << std::endl;
 
         // 校验数据块的CRC32值
         if (received_crc32 != block.crc32) {

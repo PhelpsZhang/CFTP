@@ -17,8 +17,8 @@ struct Handshake
 struct DataBlock
 {
     int block_num;         // 数据块的序号
+    uint32_t crc32;        // 数据块的CRC32校验值  注意，这一行原本是在data数组下面的，但是由于data数组长度不定，万一包大小不是MTU，那么就可能被提前截断而读不到了。因此，我们不得不挪到data上面来。
     char data[DATA_SIZE];  // 实际数据内容，最大1400字节
-    uint32_t crc32;        // 数据块的CRC32校验值
 };
 
 // 定义ACK结构体，用于服务器反馈确认信息
@@ -132,6 +132,12 @@ int main(int argc, char *argv[])
         return -1;
     }
 
+    //下方3行代码：获取并持久化程序开始的时刻
+    auto now = std::chrono::system_clock::now();
+    auto duration = now.time_since_epoch();
+    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+
+
     const char *server_ip = argv[1];    // 服务器IP地址
     int port = atoi(argv[2]);           // 服务器端口号
     const char *file_path = argv[3];    // 要发送的文件路径
@@ -159,6 +165,9 @@ int main(int argc, char *argv[])
         std::cerr << "Socket creation failed." << std::endl;
         return -1;
     }
+
+
+    int resent_count = 0; //定义一个变量用于计数重传包数（包括一切情况导致的重传）
 
     // 设置服务器地址信息
     memset(&servaddr, 0, sizeof(servaddr));    // 清空结构体
@@ -223,6 +232,7 @@ int main(int argc, char *argv[])
             
             send_packet(sockfd, block, bytes_read, servaddr, len); // 发送数据包
             std::cout << "Sent block " << block.block_num << " with " << bytes_read << " bytes." << std::endl;
+            std::cout << "发送数据包了！包号：" << block.block_num << "原始端CRC32：" << block.crc32 << std::endl;
             next_seq_num++; // 序号加1
         }
 
@@ -288,6 +298,7 @@ int main(int argc, char *argv[])
                         block.crc32 = calculate_crc32(data_vector);
 
                         send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
+                        resent_count++;
                         std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes and CRC32: " << block.crc32 << " due to missing." << std::endl;
                 }
             }
@@ -306,6 +317,7 @@ int main(int argc, char *argv[])
                 std::streamsize bytes_read = file.gcount();
                 block.block_num = i;
                 send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
+                resent_count++;
                 std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes due to timeout." << std::endl;
             }
         }
@@ -323,6 +335,17 @@ int main(int argc, char *argv[])
     block.block_num = next_seq_num;            // 给结束包分配一个序号
     sendto(sockfd, &block, sizeof(block.block_num) + strlen("END"), 0, (struct sockaddr *)&servaddr, sizeof(servaddr));
 
+
+    std::cout << std::endl;
+
+    //下方5行代码：获取并持久化程序结束的时刻，并计算速率
+    now = std::chrono::system_clock::now();
+    duration = now.time_since_epoch();
+    auto end_millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    std::string transfering_duration_millis_str = std::to_string(end_millis - millis);
+    double bandwidth = (filesize * 8.0) / ((end_millis - millis) / 1000.0) / 1e6;
+
+    std::cout << "客户端已经发完了整个文件！文件大小：" << filesize / 1000 / 1000 <<  "MiB！用时：" << transfering_duration_millis_str << "毫秒！平均速率：" << bandwidth << "Mib/s！总共重传包数：" << resent_count << std::endl;
     std::cout << "File transfer completed. Sent END signal." << std::endl;
 
     file.close(); // 关闭文件
