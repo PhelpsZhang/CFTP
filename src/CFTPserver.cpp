@@ -153,13 +153,17 @@ int main(int argc, char* argv[]) {
     while (true) {
         memset(block.data, 0, sizeof(block.data)); // 清空数据缓冲区
         int n = recvfrom(sockfd, &block, sizeof(block), 0, (struct sockaddr*)&cliaddr, &len);
+        
+        // 只要来了数据包就该++count，不然无法触发当前的ACK策略
+        received_count++;
 
+        std::cout << "expected_seq_num:" << expected_seq_num << std::endl;
+        std::cout << "block.block_num:" << block.block_num << std::endl;
         // 如果接收到期望的包，按顺序写入文件
         if (block.block_num == expected_seq_num) {
             std::cout << "Received expected block " << block.block_num << std::endl;
             file.write(block.data, n - sizeof(block.block_num)); // 写入数据
             expected_seq_num++;
-            received_count++;
 
             // 检查缓存中是否有后续的数据包
             while (buffer.count(expected_seq_num)) {
@@ -174,7 +178,7 @@ int main(int argc, char* argv[]) {
             std::cout << "Buffered out-of-order block " << block.block_num << std::endl;
             buffer[block.block_num] = std::string(block.data, n - sizeof(block.block_num));
         }
-
+        
         // 检查是否已经收到最后一个数据包
         if (block.block_num == total_blocks - 1) {
             std::cout << "Received last block (" << block.block_num << "). Sending ACK." << std::endl;
@@ -189,6 +193,7 @@ int main(int argc, char* argv[]) {
         }
 
         // 每收到WINDOW_SIZE个包后发送ACK
+        std::cout << "received_count:" << received_count << std::endl;
         if (received_count >= WINDOW_SIZE) {
             ack.highest_received_block = expected_seq_num - 1; // 收到的最高序号
 
