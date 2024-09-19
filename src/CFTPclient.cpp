@@ -282,44 +282,52 @@ int main(int argc, char *argv[])
             // 这里是超时处理逻辑，可以执行重传操作
             next_seq_num = base;
         } else {
-            // 收到ACK
-            recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&servaddr, &len);
-            std::cout << "******************ACK received****************" << std::endl;
-            std::cout << "ack.highest_received_block:"  << ack.highest_received_block << std::endl; 
-            std::cout << "missing_blocks bool array: ";
-            for(int i=0;i<sizeof(ack.missing_blocks);i++){
-                std::cout<<ack.missing_blocks[i] << ",";
-            }
 
-            // 更新窗口起始序号
-            if (ack.highest_received_block >= base) {
-                base = ack.highest_received_block + 1;
-            }
+            // 处理所有触发的事件
+            for (int i = 0; i < nfds; ++i) {
+                if (events[i].events & EPOLLIN) {
+                    // 套接字可读，处理读事件
+                    // 收到ACK
+                    recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr *)&servaddr, &len);
+                    std::cout << "******************ACK received****************" << std::endl;
+                    std::cout << "ack.highest_received_block:"  << ack.highest_received_block << std::endl; 
+                    std::cout << "missing_blocks bool array: ";
+                    for(int i=0;i<sizeof(ack.missing_blocks);i++){
+                        std::cout<<ack.missing_blocks[i] << ",";
+                    }
 
-            // 重传ACK中标记为缺失的包
-            for (int i = 0; i < WINDOW_SIZE; i++)
-            {
-                int seq_num_to_resend = base + i; // 计算需要重传的序号
-                if (ack.missing_blocks[i] && seq_num_to_resend < next_seq_num) // 确保该序号已发送过
-                {
-                    if (seq_num_to_resend * agreed_mtu < filesize)
+                    // 更新窗口起始序号
+                    if (ack.highest_received_block >= base) {
+                        base = ack.highest_received_block + 1;
+                    }
+
+                    // 重传ACK中标记为缺失的包
+                    for (int i = 0; i < WINDOW_SIZE; i++)
                     {
-                        file.seekg(seq_num_to_resend * agreed_mtu); // 定位到相应位置
-                        int bytes_to_read = std::min(agreed_mtu, static_cast<int>(filesize - seq_num_to_resend * agreed_mtu));
-                        file.read(block.data, bytes_to_read);
-                        std::streamsize bytes_read = file.gcount();
-                        block.block_num = seq_num_to_resend;
+                        int seq_num_to_resend = base + i; // 计算需要重传的序号
+                        if (ack.missing_blocks[i] && seq_num_to_resend < next_seq_num) // 确保该序号已发送过
+                        {
+                            if (seq_num_to_resend * agreed_mtu < filesize)
+                            {
+                                file.seekg(seq_num_to_resend * agreed_mtu); // 定位到相应位置
+                                int bytes_to_read = std::min(agreed_mtu, static_cast<int>(filesize - seq_num_to_resend * agreed_mtu));
+                                file.read(block.data, bytes_to_read);
+                                std::streamsize bytes_read = file.gcount();
+                                block.block_num = seq_num_to_resend;
 
-                        // 计算数据块的CRC32校验值
-                        std::vector<char> data_vector(block.data, block.data + bytes_read);
-                        block.crc32 = calculate_crc32(data_vector);
+                                // 计算数据块的CRC32校验值
+                                std::vector<char> data_vector(block.data, block.data + bytes_read);
+                                block.crc32 = calculate_crc32(data_vector);
 
-                        send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
-                        resent_count++;
-                        std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes and CRC32: " << block.crc32 << " due to missing." << std::endl;
+                                send_packet(sockfd, block, bytes_read, servaddr, len); // 重传数据包
+                                resent_count++;
+                                std::cout << "Resent block " << block.block_num << " with " << bytes_read << " bytes and CRC32: " << block.crc32 << " due to missing." << std::endl;
+                            }
+                        }
                     }
                 }
             }
+
         }
     }
 
