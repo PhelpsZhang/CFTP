@@ -5,7 +5,7 @@ EE542 Lab4 customize FTP program
 
 If you do not have `make` and `g++`, you need to install it.
 ```bash
-sudo apt install make g++
+sudo apt-get install make g++ zlib1g-dev libc6-dev
 ```
 
 ```bash

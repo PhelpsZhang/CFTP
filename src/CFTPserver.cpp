@@ -1,95 +1,283 @@
 #include "CFTPserver.h"
 
 // 定义服务器的最大传输单元（MTU）和每个数据块的大小
-#define SERVER_MTU 1400
-#define DATA_SIZE 1400
-#define WINDOW_SIZE 100  // 滑动窗口的大小
+#define MAX_PACKET_SIZE 1400
+#define WINDOW_SIZE 4000  // 滑动窗口的大小
+#define TIMEOUT 10 // ms
+
+enum MessageType {
+    HANDSHAKE_REQUEST,
+    HANDSHAKE_RESPONSE,
+    DATA_PACKET,
+    ACK_PACKET,
+    END_OF_TRANSMISSION // tranmission end.
+};
 
 // 定义握手结构体，包含文件名、文件大小、客户端MTU和CRC32校验值
-struct Handshake {
-    char filename[256];   // 文件名，最多256字符
-    long filesize;        // 文件大小（字节）
-    int mtu;              // 客户端的MTU
-    uint32_t crc32_hash;  // 用于校验文件的CRC32哈希值
+struct HandshakeMessage {
+    MessageType type;
+    int window_size;
+    int mtu;
+    int file_name_length;  // 文件名长度
 };
 
-// 定义数据块结构体，包含数据块序号和实际数据
-struct DataBlock {
-    int block_num;        // 数据块序号
-    uint32_t crc32;       // 数据块的CRC32校验值 注意，这一行原本是在data数组下面的，但是由于data数组长度不定，万一包大小不是MTU，那么就可能被提前截断而读不到了。因此，我们不得不挪到data上面来。
-    char data[DATA_SIZE]; // 数据块内容，最大大小为1400字节
+struct Packet {
+    MessageType type;
+    int seq_num;        // 序列号
+    uint32_t crc32;     // 校验和
+    int size;           // 数据大小（字节数）
+    // 数据不作为结构体成员，单独处理
 };
 
-// 定义ACK结构体，包含确认的最高序号和缺失包的位图
 struct Ack {
-    int highest_received_block;    // 已确认的最高数据块序号
-    bool missing_blocks[WINDOW_SIZE];  // 缺失数据包的位图，表示哪些包没有收到
+    MessageType type;
+    int acked;              // 累计确认序列号
+    int interval_count;     // 缺失区间的数量
+    // SACK缺失区间列表不在这里
 };
 
-// CRC32查找表，用于加速CRC32校验的计算
-uint32_t crc32_table[256];
+// 计算CRC32校验和
+uint32_t calculate_CRC32(const char* data, size_t length) {
+    return crc32(0L, reinterpret_cast<const Bytef*>(data), length);
+}
 
-// 初始化CRC32查找表，使用CRC32的多项式生成每个字节的校验值
-void init_crc32_table() {
-    uint32_t polynomial = 0xEDB88320; // CRC32 多项式
-    for (uint32_t i = 0; i < 256; i++) {
-        uint32_t crc = i;
-        for (uint32_t j = 8; j > 0; j--) {
-            if (crc & 1) {
-                crc = (crc >> 1) ^ polynomial; // 如果最低位为1，进行异或运算
-            } else {
-                crc >>= 1; // 否则直接右移
-            }
+// 序列化ACK
+std::vector<char> serialize_Ack(const Ack& ack, const std::vector<std::pair<int, int>>& missing_intervals) {
+    size_t total_size = sizeof(int) * 3 + missing_intervals.size() * sizeof(int) * 2;
+    std::vector<char> buffer(total_size);
+
+    size_t offset = 0;
+
+    // 序列化 type
+    int type_network = htonl(ack.type);
+    memcpy(buffer.data() + offset, &type_network, sizeof(int));
+    offset += sizeof(int);
+
+    // 序列化 acked
+    int acked_network = htonl(ack.acked);
+    memcpy(buffer.data() + offset, &acked_network, sizeof(int));
+    offset += sizeof(int);
+
+    // 序列化 interval_count
+    int interval_count_network = htonl(ack.interval_count);
+    memcpy(buffer.data() + offset, &interval_count_network, sizeof(int));
+    offset += sizeof(int);
+
+    // 序列化缺失区间列表
+    for (const auto& interval : missing_intervals) {
+        int start_network = htonl(interval.first);
+        int end_network = htonl(interval.second);
+
+        memcpy(buffer.data() + offset, &start_network, sizeof(int));
+        offset += sizeof(int);
+
+        memcpy(buffer.data() + offset, &end_network, sizeof(int));
+        offset += sizeof(int);
+    }
+
+    return buffer;
+}
+
+// 反序列化 Packet
+Packet deserialize_packet(const std::vector<char>& buffer, char*& data) {
+    Packet packet;
+    size_t offset = 0;
+
+    // 反序列化 type
+    int type_network;
+    memcpy(&type_network, buffer.data() + offset, sizeof(int));
+    packet.type = static_cast<MessageType>(ntohl(type_network));
+    offset += sizeof(int);
+
+    // 反序列化 seq_num
+    int seq_num_network;
+    memcpy(&seq_num_network, buffer.data() + offset, sizeof(int));
+    packet.seq_num = ntohl(seq_num_network);
+    offset += sizeof(int);
+
+    // 反序列化 crc32
+    uint32_t crc32_network;
+    memcpy(&crc32_network, buffer.data() + offset, sizeof(uint32_t));
+    packet.crc32 = ntohl(crc32_network);
+    offset += sizeof(uint32_t);
+
+    // 反序列化 size
+    int size_network;
+    memcpy(&size_network, buffer.data() + offset, sizeof(int));
+    packet.size = ntohl(size_network);
+    offset += sizeof(int);
+
+    // 反序列化 data
+    if (packet.size > 0) {
+        data = new char[packet.size];
+        memcpy(data, buffer.data() + offset, packet.size);
+    } else {
+        data = nullptr;
+    }
+
+    return packet;
+}
+
+// 序列化HandShakeMessage
+std::vector<char> serialize_handshake(const HandshakeMessage& msg, const std::string& file_name) {
+    size_t total_size = sizeof(int) * 4 + file_name.size();
+    std::vector<char> buffer(total_size);
+
+    size_t offset = 0;
+
+    // 序列化 type
+    int type_network = htonl(msg.type);
+    memcpy(buffer.data() + offset, &type_network, sizeof(int));
+    offset += sizeof(int);
+
+    // 序列化 window_size
+    int window_size_network = htonl(msg.window_size);
+    memcpy(buffer.data() + offset, &window_size_network, sizeof(int));
+    offset += sizeof(int);
+
+    // MTU
+    int mtu_network = htonl(msg.mtu);
+    memcpy(buffer.data() + offset, &mtu_network, sizeof(int));
+    offset += sizeof(int);
+
+    // 序列化 file_name_length
+    int file_name_length_network = htonl(file_name.size());
+    memcpy(buffer.data() + offset, &file_name_length_network, sizeof(int));
+    offset += sizeof(int);
+
+    // 序列化文件名
+    memcpy(buffer.data() + offset, file_name.data(), file_name.size());
+
+    return buffer;
+}
+
+// 反序列化handshake
+HandshakeMessage deserialize_handshake(const std::vector<char>& buffer, std::string& file_name) {
+    HandshakeMessage msg;
+    size_t offset = 0;
+
+    // 反序列化 type
+    int type_network;
+    memcpy(&type_network, buffer.data() + offset, sizeof(int));
+    msg.type = static_cast<MessageType>(ntohl(type_network));
+    offset += sizeof(int);
+
+    // 反序列化 window_size
+    int window_size_network;
+    memcpy(&window_size_network, buffer.data() + offset, sizeof(int));
+    msg.window_size = ntohl(window_size_network);
+    offset += sizeof(int);
+
+    // MTU
+    int mtu_network;
+    memcpy(&mtu_network, buffer.data() + offset, sizeof(int));
+    msg.mtu = ntohl(mtu_network);
+    offset += sizeof(int);
+
+    // 反序列化 file_name_length
+    int file_name_length_network;
+    memcpy(&file_name_length_network, buffer.data() + offset, sizeof(int));
+    int file_name_length = ntohl(file_name_length_network);
+    offset += sizeof(int);
+
+    // 反序列化文件名
+    if (file_name_length > 0) {
+        file_name.assign(buffer.data() + offset, file_name_length);
+    } else {
+        file_name.clear();
+    }
+
+    return msg;
+}
+
+// 设置socket非阻塞
+int set_sock_nonblock(int sockfd) {
+    // 获取当前的文件描述符标志
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags == -1) {
+        std::cerr << "fcntl(F_GETFL) failed" << std::endl;
+        return -1;
+    }
+
+    // 将 O_NONBLOCK 标志添加到 flags 中
+    flags |= O_NONBLOCK;
+
+    // 设置新的标志回到 socket
+    if (fcntl(sockfd, F_SETFL, flags) == -1) {
+        std::cerr << "fcntl(F_SETFL) failed" << std::endl;
+        return -1;
+    }
+
+    return 0;  // 设置成功
+}
+
+void send_ack(int sockfd, struct sockaddr_in& cliaddr, socklen_t len, int acked_num, const std::vector<std::pair<int, int>>& missing_intervals) {
+    Ack ack;
+    ack.type = ACK_PACKET;
+    ack.acked = acked_num;
+    ack.interval_count = missing_intervals.size();
+
+    // 序列化 ACK
+    std::vector<char> serialized_ack = serialize_Ack(ack, missing_intervals);
+
+    // 发送 ACK
+    ssize_t sent_size = sendto(sockfd, serialized_ack.data(), serialized_ack.size(), 0, (struct sockaddr*)&cliaddr, len);
+    if (sent_size < 0) {
+        perror("发送ACK失败");
+        return ;
+    }
+
+    std::cout << "Sent ACK，Accumu acked Seq: " << ack.acked << std::endl;
+    if (ack.interval_count > 0) {
+        std::cout << "，Missing Intervals Count: " << ack.interval_count;
+        for (const auto& interval : missing_intervals) {
+            std::cout << " (" << interval.first << ", " << interval.second << ")";
         }
-        crc32_table[i] = crc;
     }
+    std::cout << std::endl;
 }
 
-// 计算单个数据块的CRC32校验值，使用查找表进行加速
-uint32_t calculate_crc32(const std::vector<char>& data, uint32_t crc = 0xFFFFFFFF) {
-    for (size_t i = 0; i < data.size(); i++) {
-        uint8_t byte = data[i]; // 获取数据的每一个字节
-        crc = (crc >> 8) ^ crc32_table[(crc ^ byte) & 0xFF]; // 查表并更新CRC值
-    }
-    return crc;
-}
+/**
+ * @brief 合并连续的缺失序列号为区间
+ * 
+ * @param missing_intervals 原始的缺失序列号列表，每个元素为一个序列号对 (start, end)
+ * @return std::vector<std::pair<int, int>> 合并后的缺失区间列表
+ */
+std::vector<std::pair<int, int>> merge_intervals(const std::vector<std::pair<int, int>>& intervals) {
+    std::vector<std::pair<int, int>> merged_intervals;
 
-// 计算整个文件的CRC32校验值
-uint32_t calculate_file_crc32(const std::string& file_path) {
-    std::ifstream file(file_path, std::ios::binary); // 打开文件以二进制模式读取
-    if (!file.is_open()) {
-        std::cerr << "无法打开文件: " << file_path << std::endl;
-        return 0;
+    if (intervals.empty()) {
+        return merged_intervals;
     }
 
-    init_crc32_table(); // 初始化CRC32查找表
+    // 复制并排序区间
+    std::vector<std::pair<int, int>> sorted_intervals = intervals;
+    std::sort(sorted_intervals.begin(), sorted_intervals.end(),
+              [](const std::pair<int, int>& a, const std::pair<int, int>& b) {
+                  return a.first < b.first;
+              });
 
-    uint32_t crc = 0xFFFFFFFF; // 初始值
-    std::vector<char> buffer(4096); // 每次读取4KB数据
+    int current_start = sorted_intervals[0].first;
+    int current_end = sorted_intervals[0].second;
 
-    while (file.good()) {
-        file.read(buffer.data(), buffer.size()); // 从文件中读取数据
-        std::streamsize bytes_read = file.gcount(); // 获取实际读取的字节数
-        if (bytes_read > 0) {
-            buffer.resize(bytes_read); // 调整缓冲区大小以适应读取的数据量
-            crc = calculate_crc32(buffer, crc); // 更新CRC32校验值
+    for (size_t i = 1; i < sorted_intervals.size(); ++i) {
+        if (sorted_intervals[i].first <= current_end + 1) {
+            // 合并区间
+            current_end = std::max(current_end, sorted_intervals[i].second);
+        } else {
+            // 不可合并，保存当前区间并开始新的区间
+            merged_intervals.emplace_back(current_start, current_end);
+            current_start = sorted_intervals[i].first;
+            current_end = sorted_intervals[i].second;
         }
     }
 
-    return crc ^ 0xFFFFFFFF; // 返回最终的CRC32校验值
+    // 添加最后一个区间
+    merged_intervals.emplace_back(current_start, current_end);
+
+    return merged_intervals;
 }
 
-// 计算数据块的CRC32校验值
-uint32_t calculate_block_crc32(const char* data, size_t length) {
-    init_crc32_table(); // 初始化CRC32查找表
-
-    uint32_t crc = 0xFFFFFFFF; // 初始值
-    std::vector<char> buffer(data, data + length); // 将数据块转换为vector
-
-    crc = calculate_crc32(buffer, crc); // 计算CRC32校验值
-
-    return crc ^ 0xFFFFFFFF; // 返回最终的CRC32校验值
-}
 
 // 服务器程序的主函数
 int main(int argc, char* argv[]) {
@@ -100,15 +288,18 @@ int main(int argc, char* argv[]) {
 
     int port = atoi(argv[1]); // 从命令行参数中获取端口号
 
-    auto now = std::chrono::system_clock::now();
-    auto duration = now.time_since_epoch();
-    auto millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+    // auto begin = std::chrono::system_clock::now();
+    // auto duration = begin.time_since_epoch();
+    // auto begin_millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
 
     int sockfd; // 服务器的socket文件描述符
     struct sockaddr_in servaddr, cliaddr; // 服务器和客户端的地址结构
-    Handshake handshake; // 握手信息
-    DataBlock block; // 数据块
-    Ack ack; // ACK确认信息
+    socklen_t len = sizeof(cliaddr); // 客户端地址长度
+    int agreed_mtu;
+    int timeout = TIMEOUT;
+
+    // size_t protocol_header_size = sizeof(int) * 3 + sizeof(uint32_t);
+    // size_t max_data_size;
 
     // 创建UDP socket
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -117,8 +308,15 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
+    // 设置非阻塞模式
+    if (-1 == set_sock_nonblock(sockfd)) {
+        close(sockfd);
+        return -1;
+    }
+
     // 服务器地址初始化
     memset(&servaddr, 0, sizeof(servaddr));
+    memset(&cliaddr, 0, sizeof(cliaddr));
     servaddr.sin_family = AF_INET; // 使用IPv4协议
     servaddr.sin_addr.s_addr = INADDR_ANY; // 接受来自任意地址的连接
     servaddr.sin_port = htons(port); // 设置服务器的端口号
@@ -129,132 +327,247 @@ int main(int argc, char* argv[]) {
         return -1;
     }
 
-    socklen_t len = sizeof(cliaddr); // 客户端地址长度
+    // 打开输出文件
+    std::ofstream file;
+    
+    // 按顺序期望接到的下一个序列号
+    int expected_seq_num = 0;
+    // 当前成功收到的最大序列号
+    int max_received_num = 0;
 
-    // 接收客户端的握手信息，包含文件名、文件大小等
-    recvfrom(sockfd, &handshake, sizeof(handshake), 0, (struct sockaddr*)&cliaddr, &len);
-    std::cout << "Handshake received: " << std::endl;
-    std::cout << "Filename: " << handshake.filename << std::endl;
-    std::cout << "Filesize: " << handshake.filesize << std::endl;
-    std::cout << "Client MTU: " << handshake.mtu << std::endl;
+    bool is_last_received = false;
+    bool trans_finish = false;
 
-    // 确定使用的最小MTU
-    int agreed_mtu = std::min(SERVER_MTU, handshake.mtu);
-    std::cout << "Agreed MTU: " << agreed_mtu << std::endl;
+    // receiver window, x[seq] = data 。缓存收到的data数据。
+    std::map<int, std::vector<char>> recv_buffer;
+    // 这里可以得知已经成功发到的包号。
 
-    // 计算文件需要传输的总数据块数
-    int total_blocks = (handshake.filesize + agreed_mtu - 1) / agreed_mtu;
-    std::cout << "Total blocks to receive: " << total_blocks << std::endl;
+    // 记录校验失败的序列号集合
+    std::set<int> wrong_seqs_set;
 
-    // 将协商好的MTU发送回客户端
-    sendto(sockfd, &agreed_mtu, sizeof(agreed_mtu), 0, (struct sockaddr*)&cliaddr, len);
-
-    // 创建一个临时文件来保存接收到的数据
-    std::string millis_str = std::to_string(millis);
-    std::string temp_file_name = "received_file" + millis_str;
-    std::ofstream file(temp_file_name, std::ios::binary);
-    if (!file.is_open()) {
-        std::cerr << "Failed to open output file." << std::endl;
+    // 创建epoll实例
+    int epfd = epoll_create1(0);
+    if (epfd == -1) {
+        perror("epoll创建失败");
         close(sockfd);
         return -1;
     }
 
-   int expected_seq_num = 0; // 期望的下一个数据块序号
-    std::map<int, std::string> buffer; // 缓存乱序到达的包
-    int received_count = 0; // 计数器，用于控制发送ACK的频率
+    // 将Scoket加入epoll监控列表
+    struct epoll_event ev;
+    ev.events = EPOLLIN; // 监控可读事件
+    ev.data.fd = sockfd;
+    if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) == -1) {
+        perror("epoll_ctl失败");
+        close(sockfd);
+        close(epfd);
+        return -1;
+    } 
 
-    while (true) {
-        memset(block.data, 0, sizeof(block.data)); // 清空数据缓冲区
-        block.crc32=888; //注意，上面那一行我们用memset清空了数据缓冲区。但是，crc32这个字段并没有被清空。为了清空，我们赋任意值即可。赋值888仅仅为了能够帮助我们快速锁定问题，没有特殊含义。
-        int n = recvfrom(sockfd, &block, sizeof(block), 0, (struct sockaddr*)&cliaddr, &len);
-        // 只要来了数据包就该++count，不然无法触发当前的ACK策略
-        received_count++;
 
-        // 计算接收到的数据块的CRC32校验值
-        uint32_t received_crc32 = calculate_block_crc32(block.data, n - sizeof(block.block_num) - sizeof(block.crc32));
-        std::cout << "收到数据包了！包号：" << block.block_num << "预期CRC32：" << block.crc32 << "实际CRC32:" << received_crc32  << std::endl;
+    bool handshake_finish = false;
+    std::string file_name_str;
 
-        // 校验数据块的CRC32值
-        if (received_crc32 != block.crc32) {
-            std::cerr << "CRC32 mismatch for block " << block.block_num << ". Expected: " << block.crc32 << ", Received: " << received_crc32 << std::endl;
-            continue; // 忽略该数据块
+    while (!handshake_finish) {
+        struct epoll_event events[1];
+        // Blocking wait
+        int nfds = epoll_wait(epfd, events, 1, -1);
+        if (nfds == -1) {
+            perror("epoll_wait失败");
+            close(sockfd);
+            close(epfd);
+            return -1;
         }
 
-        std::cout << "expected_seq_num:" << expected_seq_num << std::endl;
-        std::cout << "block.block_num:" << block.block_num << std::endl;
-        // 如果接收到期望的包，按顺序写入文件
-        if (block.block_num == expected_seq_num) {
-            std::cout << "Received expected block " << block.block_num << std::endl;
-            file.write(block.data, n - sizeof(block.block_num) - sizeof(block.crc32)); // 写入数据
-            expected_seq_num++;
+        if (events[0].events & EPOLLIN) {
+            // 接收握手请求
+            std::vector<char> buffer(1024);
+            ssize_t recv_size = recvfrom(sockfd, buffer.data(), buffer.size(), 0,
+                                         (struct sockaddr*)&cliaddr, &len);
+            if (recv_size > 0) {
+                buffer.resize(recv_size);
+                HandshakeMessage hs_req = deserialize_handshake(buffer, file_name_str);
+                if (hs_req.type == HANDSHAKE_REQUEST) {
+                    // 接到握手req，文件名已知
+                    std::cout << "接收到握手请求，文件名：" << file_name_str << "MTU:" << hs_req.mtu <<std::endl;
+                    
+                    agreed_mtu = hs_req.mtu;
+                    timeout = agreed_mtu;
+                    
+                    // decide a mtu
 
-            // 检查缓存中是否有后续的数据包
-            while (buffer.count(expected_seq_num)) {
-                std::cout << "Writing buffered block " << expected_seq_num << std::endl;
-                file.write(buffer[expected_seq_num].c_str(), agreed_mtu); // 从缓存写入数据
-                buffer.erase(expected_seq_num);
-                expected_seq_num++;
-                received_count++;
-            }
-        } else if (block.block_num > expected_seq_num) {
-            // 如果接收到的包序号大于期望的，缓存该包
-            std::cout << "Buffered out-of-order block " << block.block_num << std::endl;
-            buffer[block.block_num] = std::string(block.data, n - sizeof(block.block_num) - sizeof(block.crc32));
-            
-        }
-        
-        // 检查是否已经收到最后一个数据包
-        if (block.block_num == total_blocks - 1) {
-            std::cout << "Received last block (" << block.block_num << "). Sending ACK." << std::endl;
+                    file.open(file_name_str, std::ios::out | std::ios::binary);
+                    if (!file.is_open()) {
+                        perror("文件打开失败");
+                        close(sockfd);
+                        return -1;
+                    }
+                    
+                    // 发送握手响应
+                    HandshakeMessage hs_resp;
+                    hs_resp.type = HANDSHAKE_RESPONSE;
+                    hs_resp.window_size = WINDOW_SIZE;
+                    hs_resp.file_name_length = 0;
+                    hs_resp.mtu = agreed_mtu;
 
-            // 构建最后的ACK并发送
-            ack.highest_received_block = block.block_num;
-            memset(ack.missing_blocks, 0, sizeof(ack.missing_blocks)); // 没有缺失块
-            sendto(sockfd, &ack, sizeof(ack), 0, (struct sockaddr*)&cliaddr, len);
-
-            std::cout << "File transfer completed." << std::endl;
-            break;
-        }
-
-        // 每收到WINDOW_SIZE个包后发送ACK
-        std::cout << "received_count:" << received_count << std::endl;
-        if (received_count >= WINDOW_SIZE) {
-            ack.highest_received_block = expected_seq_num - 1; // 收到的最高序号
-
-            // 设置ACK中的缺失块信息
-            memset(ack.missing_blocks, 0, sizeof(ack.missing_blocks));
-            for (int i = 0; i < WINDOW_SIZE; i++) {
-                if (buffer.count(expected_seq_num + i) == 0) {
-                    ack.missing_blocks[i] = true;  // 标记为缺失包
+                    std::vector<char> hs_resp_data = serialize_handshake(hs_resp, "");
+                    sendto(sockfd, hs_resp_data.data(), hs_resp_data.size(), 0,
+                           (struct sockaddr*)&cliaddr, len);
+                    std::cout << "发送握手响应" << std::endl;
+                    handshake_finish = true;
                 }
             }
-
-            // 发送ACK给客户端
-            sendto(sockfd, &ack, sizeof(ack), 0, (struct sockaddr*)&cliaddr, len);
-            std::cout << "Sent ACK for block " << ack.highest_received_block << std::endl;
-
-            // 重置计数器
-            received_count = 0;
         }
     }
+
+
+    // 引入时间控制变量
+    auto last_SACK_time = std::chrono::steady_clock::now();
+    const std::chrono::milliseconds ack_interval(timeout); // 500 毫秒
+
+    while (!trans_finish) {
+        // 使用epoll等待事件
+        struct epoll_event events[1];
+        int nfds = epoll_wait(epfd, events, 1, timeout);
+        if (nfds == -1) {
+            perror("epoll_wait失败");
+            close(sockfd);
+            close(epfd);
+            return -1;
+        } else if (nfds == 0) {
+            // epoll_wait 超时
+            std::vector<std::pair<int, int>> missing_intervals;
+            if (expected_seq_num >= max_received_num) {
+                // 一般情况，发个ACK刺激一下
+                // 此处missing_intervals为空。
+                send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
+            } else {
+                // 说明真的有一段时间啥也没干了，超时了（如果收到结束数据包的话应该已经出循环了，可是没有）
+                // 构建发SACK刺激一下
+                // 统计当前窗口内的缺失包
+                for (int seq = expected_seq_num; seq < expected_seq_num + WINDOW_SIZE && seq <= max_received_num; ++seq) {
+                    if (recv_buffer.find(seq) == recv_buffer.end() && wrong_seqs_set.find(seq) == wrong_seqs_set.end()) {
+                        missing_intervals.emplace_back(seq, seq);
+                    }
+                }
+                // 添加 CRC 校验失败的序列号
+                for (const int& corrupted_seq : wrong_seqs_set) {
+                    missing_intervals.emplace_back(corrupted_seq, corrupted_seq);
+                }
+                missing_intervals = merge_intervals(missing_intervals);
+                send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
+                last_SACK_time = std::chrono::steady_clock::now();   
+            }
+        } else {
+            // 处理所有触发的事件,这里只有一个
+            if (events[0].events & EPOLLIN) {
+                // 收到了数据包
+                std::vector<char> buffer(MAX_PACKET_SIZE);
+                int count = 0;
+                while((count = recvfrom(sockfd, buffer.data(), buffer.size(), 0, (struct sockaddr*)&cliaddr, &len)) > 0) {
+                    // 全部处理
+                    buffer.resize(count);
+                    // 反序列化
+                    char *data = nullptr;
+                    Packet packet = deserialize_packet(buffer, data);
+                    std::cout << "监听接到了数据" << std::endl;
+
+                    std::vector<std::pair<int,int>> missing_intervals;
+                    
+                    if (packet.type == DATA_PACKET) {
+                        std::cout << "接到了数据包，包号 Seq Num: " << packet.seq_num << std::endl;
+                        // 校验CRC32
+                        uint32_t crc32_calculated = calculate_CRC32(data, packet.size);
+                        std::cout << "Receiver: Seq Num = " << packet.seq_num << ", Data Size = " << packet.size << ", Received CRC32 = " << packet.crc32 << ", Calculated CRC32 = " << crc32_calculated << std::endl;
+                        
+                        if (packet.crc32 == crc32_calculated) {
+                            // 校验成功
+                            // 如果该序列号之前就已经在wrong_seqs_set中了，移除它
+                            if (wrong_seqs_set.find(packet.seq_num) != wrong_seqs_set.end()) {
+                                wrong_seqs_set.erase(packet.seq_num);
+                            }
+                            if (packet.seq_num == expected_seq_num) {
+                                // 写文件
+                                std::vector<char> tmp = std::vector<char>(data, data + packet.size);
+                                file.write(tmp.data(), tmp.size());
+                                expected_seq_num++;
+                                // 开始尝试写入连续数据包
+                                // 检查缓存，只要缓存中存在了连续的下一个seq号：expected_seq_num，就写
+                                while (recv_buffer.find(expected_seq_num) != recv_buffer.end()) {
+                                    // 找到了期待的下一个seq号。
+                                    // 没检查连续
+                                    file.write(recv_buffer[expected_seq_num].data(), recv_buffer[expected_seq_num].size());
+                                    std::cout << "Write the packet to file, Seq Num: " << expected_seq_num << std::endl;
+                                    // 移除已经写入的包
+                                    recv_buffer.erase(expected_seq_num);
+                                    expected_seq_num++;
+                                }
+                                if (max_received_num < expected_seq_num) max_received_num = expected_seq_num;
+                                // 直接ACK
+                                send_ack(sockfd, cliaddr, len, packet.seq_num, missing_intervals);
+                            } else if (packet.seq_num > expected_seq_num) {
+                                // 缓存没有，那就是比expected_seq高，就可以放进缓存。
+                                if (recv_buffer.find(packet.seq_num) == recv_buffer.end()) {
+                                    // 如果没找到，就加入缓存。
+                                    recv_buffer[packet.seq_num] = std::vector<char>(data, data + packet.size);
+                                    if (packet.seq_num > max_received_num) {
+                                        max_received_num = packet.seq_num;
+                                    }
+                                    // 之加入缓存，等一等。
+                                    // 如果超时了就发一下，不超时不发.
+                                    if (std::chrono::steady_clock::now() > last_SACK_time + ack_interval) {
+                                        // 超时了，重发。
+                                        for (int seq = expected_seq_num; seq < expected_seq_num + WINDOW_SIZE && seq <= max_received_num; ++seq) {
+                                            if (recv_buffer.find(seq) == recv_buffer.end() && wrong_seqs_set.find(seq) == wrong_seqs_set.end()) {
+                                                missing_intervals.emplace_back(seq, seq);
+                                            }
+                                        }
+                                        // 添加 CRC 校验失败的序列号
+                                        for (const int& corrupted_seq : wrong_seqs_set) {
+                                            missing_intervals.emplace_back(corrupted_seq, corrupted_seq);
+                                        }
+                                        missing_intervals = merge_intervals(missing_intervals);
+                                        send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
+                                        last_SACK_time = std::chrono::steady_clock::now();   
+                                    }
+                                    // 不超时就不管，丢给超时重传来处理。
+                                }
+                            } else {
+                                // expect_num > packet.seq_num
+                                // 说明之前的ACK可能丢失了，client没有更新base，重新把当前期待的下一个expected发回去acked一下
+                                // 此处missing_intervals为空。
+                                send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
+                            }
+
+                        } else {
+                            std::cerr << "CRC32 校验失败， Seq：" << packet.seq_num << std::endl;
+                            wrong_seqs_set.insert(packet.seq_num);
+                            // 立刻重传一个单点的SACK
+                            missing_intervals.emplace_back(packet.seq_num, packet.seq_num);
+                            send_ack(sockfd, cliaddr, len, packet.seq_num - 1, missing_intervals);
+                        }
+                    } else if (packet.type == END_OF_TRANSMISSION) {
+                        std::cout << "Receive End Information." << std::endl;
+                        is_last_received = true;
+                        // 直接一个简单的ACK
+                        send_ack(sockfd, cliaddr, len, expected_seq_num - 1, missing_intervals);
+                    }
+
+                    if (is_last_received && recv_buffer.empty()) {
+                        trans_finish = true;
+                    }
+                    delete[] data;
+
+                }
+                // 如果没有读到，放之任之让超时来处理。
+            }
+        }
+    }
+
 
     file.close();
     close(sockfd);
-
-    // 文件传输完成后，将临时文件重命名为正确的文件名，并验证CRC32校验
-    if (std::rename(temp_file_name.c_str(), handshake.filename) == 0) {
-        uint32_t crc32_hash = calculate_file_crc32(handshake.filename);
-        std::cout << "File renamed successfully to " << handshake.filename << std::endl;
-        std::cout << "Origin whole file's CRC32 is " << handshake.crc32_hash << std::endl;
-        std::cout << "Copied file's CRC32 is " << crc32_hash << std::endl;
-        if (crc32_hash == handshake.crc32_hash) {
-            std::cout << "恭喜！文件校验通过！" << std::endl;
-        } else {
-            std::cout << "遗憾！文件校验失败！继续Debug！" << std::endl;
-        }
-    } else {
-        std::perror("Error renaming file");
-    }
+    close(epfd);
 
     return 0;
 }

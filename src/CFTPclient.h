@@ -12,3 +12,8 @@
 #include <sys/epoll.h>
 #include <ctime>
 #include <chrono>
+#include <fcntl.h>
+#include <map>
+#include <zlib.h>
+#include <set>
+#include <sys/time.h>
