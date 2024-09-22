@@ -262,7 +262,7 @@ void resend_packet(int sockfd, struct sockaddr_in& servaddr, socklen_t len, int 
         // std::cerr << "sendto failed: " << strerror(errno) << std::endl;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             std::cerr << "Sent buffer is full, Waiting..." << std::endl;
-            usleep(1000);
+            usleep(100);
         } else {
             std::cerr << "Resent failed, error info：" << strerror(errno) << std::endl;
         }
@@ -581,7 +581,7 @@ int main(int argc, char *argv[])
                 std::vector<char> ack_buffer(MTU);
                 std::vector<std::pair<int,int>> missing_intervals;
                 missing_intervals.clear();
-                while((count = recvfrom(sockfd, ack_buffer.data(), ack_buffer.size(), 0, (struct sockaddr *)&servaddr, &len)) > 0) {
+                if((count = recvfrom(sockfd, ack_buffer.data(), ack_buffer.size(), 0, (struct sockaddr *)&servaddr, &len)) > 0) {
                     std::cout << "进入while循环得到recvfrom返回的count：" << count << std::endl;
                     ack = deserialize_Ack(ack_buffer, missing_intervals);
                     std::cout << "收到的ACK的interval count:" << ack.interval_count << std::endl; 
