@@ -1,7 +1,7 @@
 #include "CFTPclient.h"
 
-#define WINDOW_SIZE 2000 // 滑动窗口大小
-#define TIMEOUT 10   // 超时重传时间（ms）
+#define WINDOW_SIZE 2000 // Sliding Window Size
+#define TIMEOUT 10
 #define MTU 1400
 
 enum MessageType {
@@ -12,7 +12,7 @@ enum MessageType {
     END_OF_TRANSMISSION // tranmission end.
 };
 
-// 定义握手结构体，用于在传输前与服务器交换信息
+// Handshake message 
 struct HandshakeMessage
 {
     MessageType type;
@@ -25,22 +25,21 @@ struct HandshakeMessage
 
 struct Ack {
     MessageType type;
-    int acked;              // 累计确认序列号
-    int interval_count;     // 缺失区间的数量
-    // SACK缺失区间列表不在这里
+    int acked;              // ACKed
+    int interval_count;     // count of missing interval
+    // Selective ACK extend
 };
 
 // packet header
-struct Packet {                 // 定义数据包
+struct Packet {          
     MessageType type;
-    int seq_num;                // 包号/序号
-    uint32_t crc32;             // 检查位
-    int size;                   // 数据大小(字节数)
-    // 数据额外定义
-    // std::vector<char> data;     
+    int seq_num;                
+    uint32_t crc32;             
+    int size;                  
+    // data content extend 
 };
 
-// 序列化Packet
+// Serialize Packet
 std::vector<char> serialize_packet(const Packet& packet, const char* data) {
     size_t total_size = sizeof(int)*4 + packet.size;
     std::vector<char> buffer(total_size);
@@ -75,30 +74,29 @@ std::vector<char> serialize_packet(const Packet& packet, const char* data) {
     return buffer;
 }
 
-// 反序列化 Ack
+// deserialize Ack
 Ack deserialize_Ack(const std::vector<char>& buffer, std::vector<std::pair<int, int>>& missing_intervals) {
     Ack ack;
     size_t offset = 0;
 
-    // 反序列化 type
     int type_network;
     memcpy(&type_network, buffer.data() + offset, sizeof(int));
     ack.type = static_cast<MessageType>(ntohl(type_network));
     offset += sizeof(int);
 
-    // 反序列化 acked
+    //  acked
     int acked_network;
     memcpy(&acked_network, buffer.data() + offset, sizeof(int));
     ack.acked = ntohl(acked_network);
     offset += sizeof(int);
 
-    // 反序列化 interval_count
+    //  interval_count
     int interval_count_network;
     memcpy(&interval_count_network, buffer.data() + offset, sizeof(int));
     ack.interval_count = ntohl(interval_count_network);
     offset += sizeof(int);
 
-    // 反序列化缺失区间列表
+    // interval
     for (int i = 0; i < ack.interval_count; ++i) {
         int start_network, end_network;
         memcpy(&start_network, buffer.data() + offset, sizeof(int));
@@ -116,7 +114,7 @@ Ack deserialize_Ack(const std::vector<char>& buffer, std::vector<std::pair<int, 
     return ack;
 }
 
-// 序列化HandShakeMessage
+// serialize HandShakeMessage
 std::vector<char> serialize_handshake(const HandshakeMessage& msg, const std::string& file_name) {
     size_t total_size = sizeof(int) * 4 + sizeof(long) + file_name.size();
     std::vector<char> buffer(total_size);
@@ -154,7 +152,7 @@ std::vector<char> serialize_handshake(const HandshakeMessage& msg, const std::st
     return buffer;
 }
 
-// 反序列化handshake
+// deserialize handshake
 HandshakeMessage deserialize_handshake(const std::vector<char>& buffer, std::string& file_name) {
     HandshakeMessage msg;
     size_t offset = 0;
@@ -199,7 +197,7 @@ HandshakeMessage deserialize_handshake(const std::vector<char>& buffer, std::str
     return msg;
 }
 
-// 获取文件大小的函数，返回文件的字节数
+// get the size of file in bytes
 long getFileSize(const char *filepath) {
     struct stat stat_buf;
     if (stat(filepath, &stat_buf) != 0)
@@ -209,7 +207,7 @@ long getFileSize(const char *filepath) {
     return stat_buf.st_size; // 返回文件大小
 }
 
-// 从文件路径中提取文件名的函数
+// get filename from filepath
 std::string getFileName(const std::string &filePath) {
     size_t pos = filePath.find_last_of("/\\"); // 查找最后一个路径分隔符的位置
     if (pos != std::string::npos)
@@ -219,7 +217,7 @@ std::string getFileName(const std::string &filePath) {
     return filePath; // 如果没有分隔符，返回整个路径
 }
 
-// 设置socket非阻塞
+// set NON-Blocking 
 int set_sock_nonblock(int sockfd) {
     // 获取当前的文件描述符标志
     int flags = fcntl(sockfd, F_GETFL, 0);
@@ -240,17 +238,17 @@ int set_sock_nonblock(int sockfd) {
     return 0;  // 设置成功
 }
 
-long long get_timestamp_millis() {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+// long long get_timestamp_millis() {
+//     struct timespec ts;
+//     clock_gettime(CLOCK_REALTIME, &ts);
+//     return ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
 
-    // auto now = std::chrono::system_clock::now();
-    // auto duration = now.time_since_epoch();
-    // return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
-}
+//     // auto now = std::chrono::system_clock::now();
+//     // auto duration = now.time_since_epoch();
+//     // return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
+// }
 
-// 计算CRC32校验和
+// CRC32
 uint32_t calculate_CRC32(const char* data, size_t length) {
     return crc32(0L, reinterpret_cast<const Bytef*>(data), length);
 }
@@ -259,77 +257,74 @@ void resend_packet(int sockfd, struct sockaddr_in& servaddr, socklen_t len, int 
     int seq_num = rseq_num;
     ssize_t sent_size = sendto(sockfd, fly_packets[seq_num].data(), fly_packets[seq_num].size(),
                                         0, (struct sockaddr*)&servaddr, len);
-    //  std::cout << "发送新包，包号" << seq_num << std::endl;           
+    //  std::cout << "resent a packet, seq_num" << seq_num << std::endl;           
     if (sent_size < 0) {
+        // std::cerr << "sendto failed: " << strerror(errno) << std::endl;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            std::cerr << "发送失败，发送缓冲区已满，将稍后重试" << std::endl;
+            std::cerr << "Sent buffer is full, Waiting..." << std::endl;
+            usleep(100 * timeout);
         } else {
-            std::cerr << "发送失败，错误信息：" << strerror(errno) << std::endl;
+            std::cerr << "Resent failed, error info：" << strerror(errno) << std::endl;
         }
     }
-    // 记录发送时间，构建timeout_table。
+    // build timeout_table。
     struct timeval send_time;
     gettimeofday(&send_time, NULL);
     timeout_table[seq_num] = send_time;
 }
 
-
-// 主函数，客户端程序入口
 int main(int argc, char *argv[])
 {
     if (argc != 4)
     {
-        // 如果参数数量不正确，输出使用方法
+        // argument correction
         std::cerr << "Usage: " << argv[0] << " <IP address> <port> <file_path>" << std::endl;
         return -1;
     }
 
-    //下方3行代码：获取并持久化程序开始的时刻
+    // get the start time of program
     auto begin = std::chrono::system_clock::now();
     auto duration = begin.time_since_epoch();
     auto begin_millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
 
 
-    const char *server_ip = argv[1];    // 服务器IP地址
-    int port = atoi(argv[2]);           // 服务器端口号
-    const char *file_path = argv[3];    // 要发送的文件路径
+    const char *server_ip = argv[1];    
+    int port = atoi(argv[2]);           
+    const char *file_path = argv[3];    
 
-    int sockfd;                         // 套接字文件描述符
-    struct sockaddr_in servaddr;        // 服务器地址结构
-    Ack ack;                            // ACK结构
+    int sockfd;                         
+    struct sockaddr_in servaddr;        
+    Ack ack;                            
 
-    // 从系统读。
+    int agreed_mtu;                     
 
-    int agreed_mtu;                     // 与服务器协商后的MTU
-
-    // 获取文件大小
     long filesize = getFileSize(file_path);
     if (filesize < 0) {
         std::cerr << "Failed to get file size." << std::endl;
         return -1;
     }
 
-    // 创建UDP套接字
+    // create udp socket
     sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         std::cerr << "Socket creation failed." << std::endl;
         return -1;
     }
 
-        // 设置非阻塞socket
+    // Set Non-blocking socket
     if (-1 == set_sock_nonblock(sockfd)) {
         close(sockfd);
         return -1;
     }
 
-    // 设置服务器地址信息
-    memset(&servaddr, 0, sizeof(servaddr));    // 清空结构体
-    servaddr.sin_family = AF_INET;             // 使用IPv4
-    servaddr.sin_port = htons(port);           // 设置端口号（网络字节序）
-    servaddr.sin_addr.s_addr = inet_addr(server_ip); // 设置服务器IP地址
+    // server address info
+    memset(&servaddr, 0, sizeof(servaddr));    
+    servaddr.sin_family = AF_INET;             
+    servaddr.sin_port = htons(port);           
+    servaddr.sin_addr.s_addr = inet_addr(server_ip);
     socklen_t len = sizeof(servaddr);
 
-    // 打开要发送的文件，二进制方式
+    // open file
     std::ifstream file(file_path, std::ios::binary);
     if (!file.is_open())
     {
@@ -338,18 +333,18 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // 创建 epoll 实例
-    int epfd = epoll_create1(0);  // 参数为 0 表示默认行为
+    // create epoll instance
+    int epfd = epoll_create1(0);  // 0 for default
     if (epfd == -1) {
         std::cerr << "Failed to create epoll instance: " << strerror(errno) << std::endl;
         close(sockfd);
         return -1;
     }
 
-    // 注册套接字到 epoll 实例，监听 EPOLLIN 事件（可读事件）
+    // register socket to events list, listen EPOLLIN event
     struct epoll_event ev;
-    ev.events = EPOLLIN;  // 可读事件
-    ev.data.fd = sockfd;  // 套接字描述符
+    ev.events = EPOLLIN;  // things to read
+    ev.data.fd = sockfd;
 
     if (epoll_ctl(epfd, EPOLL_CTL_ADD, sockfd, &ev) == -1) {
         std::cerr << "Failed to add socket to epoll: " << strerror(errno) << std::endl;
@@ -359,29 +354,24 @@ int main(int argc, char *argv[])
     }
 
     bool handshake_finish = false;
-    int window_size = WINDOW_SIZE;  // 默认窗口大小
-    std::string file_name_str = file_path; // 将文件名转换为字符串
+    int window_size = WINDOW_SIZE;
+    std::string file_name_str = file_path;
 
-    int base = 0;           // 滑动窗口的起始序号
-    int next_seq_num = 0;   // 下一个要发送的数据块序号，但还没发。
-    bool is_last_packet = false;    // 判断是不是最后一个packet
-    bool trans_finish = false;        // 判断是否传输完毕
-    int resent_count = 0; //定义一个变量用于计数重传包数（包括一切情况导致的重传）
+    int base = 0;           // Sliding window left bound [)
+    int next_seq_num = 0;   // next new packet number to send 
+    bool is_last_packet = false;
+    bool trans_finish = false;
+    int resent_count = 0;   // count the retransmit times.
 
-    // 用于超时重传，记录某个packet的发送时间，发送时尽快发，不影响；需要判断超时时计算
+    // record each packet's timeout.
     std::map<int, timeval> timeout_table;
     
-    // 缓存已发送但未确认的packet，fly bytes。值是序列化后的数据
+    // "fly bytes" buffer and used to retranmit. the value are data serialized.
     std::map<int, std::vector<char>> fly_packets;
 
-    // 待重传的队列
-    std::set<int> retransmit_set;
-    
-    // 可动态调整or可从输入读
+    // timeout variable, from define or input. To be adjusted
     int timeout = TIMEOUT;
-
     int test_rtt = 0;
-
 
     // HandShake
     while (!handshake_finish) {
@@ -399,11 +389,9 @@ int main(int argc, char *argv[])
         std::vector<char> hs_req_data = serialize_handshake(hs_req, file_name_str);
         sendto(sockfd, hs_req_data.data(), hs_req_data.size(), 0,
             (struct sockaddr*)&servaddr, len);
-        //  std::cout << "发送握手请求, 文件名：" << file_name_str << std::endl;
-
+        
         // Wait for handshake response
         struct epoll_event events[1];
-        // 发送前先瞅一眼有没有ack，有的话处理，更新window再发，没的话do nothing
         int nfds = epoll_wait(epfd, events, 1, timeout * 20);
         if (nfds == -1) {
             std::cerr << "epoll wait failed." << std::endl;
@@ -411,11 +399,10 @@ int main(int argc, char *argv[])
             close(epfd);
             return -1;
         } else if (nfds == 0) {
-            // 超时，重新发送握手请求
-            //  std::cout << "握手超时，重新发送握手请求" << std::endl;
+            // timeout? do nothing.
         } else {
             if (events[0].events & EPOLLIN) {
-                // 接收握手响应
+                // handshake response
                 std::vector<char> buffer(MTU);
                 ssize_t recv_size = recvfrom(sockfd, buffer.data(), buffer.size(), 0,
                                              (struct sockaddr*)&servaddr, &len);
@@ -424,58 +411,54 @@ int main(int argc, char *argv[])
                     auto duration2 = recv.time_since_epoch();
                     auto recv_millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration2).count();
                     
-                    // 测一个模糊的rtt
+                    // measure a approximate rtt
                     test_rtt = recv_millis - sent_millis;
 
                     buffer.resize(recv_size);
-                    std::string dummy_file_name;    // response中不含文件名
+                    std::string dummy_file_name;
                     HandshakeMessage handshake_resp = deserialize_handshake(buffer, dummy_file_name);
                     if (handshake_resp.type == HANDSHAKE_RESPONSE) {
-                        // 握手成功，发送第一个数据包作为握手确认
+                        // Successful Handshake
                         handshake_finish = true;
-                        window_size = handshake_resp.window_size; // 更新窗口大小
+                        window_size = handshake_resp.window_size;
                         agreed_mtu = handshake_resp.mtu;
-                        //  std::cout << "握手成功，窗口大小：" << window_size << " MTU: " << agreed_mtu << std::endl;
-
-                        // 读取第一个数据包
+                        
+                        // Read the first data. 
                         size_t proto_header_size = sizeof(int) *3 + sizeof(uint32_t);
                         size_t desired_size = agreed_mtu - proto_header_size; // 每个数据包1KB
                         char* data_buffer = new char[desired_size];
                         file.read(data_buffer, desired_size);
                         size_t data_size = file.gcount();
 
-                        // 创建第一个数据包
+                        // the first packet, to "piggyback"
                         Packet packet;
                         packet.type = DATA_PACKET;
                         packet.seq_num = 0; // 从0开始
                         packet.size = data_size;
                         packet.crc32 = calculate_CRC32(data_buffer, data_size);
 
-                        // 序列化
                         std::vector<char> serialized_data = serialize_packet(packet, data_buffer);
 
-                        // 发送数据包
                         ssize_t sent_size = sendto(sockfd, serialized_data.data(), serialized_data.size(), 0,
                                                    (struct sockaddr*)&servaddr, len);
                         if (sent_size < 0) {
-                            perror("发送失败");
+                            perror("Failed to send");
                             close(sockfd);
                             close(epfd);
                             return -1;
                         }
 
-                        // 记录发送时间
+                        // record timeout
                         timeval send_time;
                         gettimeofday(&send_time, NULL);
                         timeout_table[0] = send_time;
 
-                        // 将数据包存入缓存
+                        // Fly packets
                         fly_packets[0] = serialized_data;
-                        //  std::cout << "发送数据包，序列号：" << packet.seq_num << std::endl;
 
                         delete[] data_buffer;
-                        next_seq_num = 1; // 更新下一个序列号
-                        base = 0;         // 初始化窗口起始序列号
+                        next_seq_num = 1; // update next seq
+                        base = 0;         // initialize the left bound of window.
                     }
                 }
             }
@@ -487,12 +470,6 @@ int main(int argc, char *argv[])
     {
         std::cout << "base:" << base << " next_seq_num: " << next_seq_num << std::endl;
         timeout = test_rtt;
-        // 发送新的数据包
-        //  std::cout << "准备发新包, 下一个准备发的新包是next_seq_num is " << next_seq_num << std::endl;
-        //  std::cout << "base+WINDOW_SIZE:" << base+WINDOW_SIZE << std::endl;
-        //  std::cout << "is_last_packet:" << is_last_packet << std::endl;
-
-        // 全丢了怎么办？没有一个回来，那就没有ACK触发，也需要重传。
 
         while (next_seq_num < base + WINDOW_SIZE && !is_last_packet)
         {
@@ -506,8 +483,6 @@ int main(int argc, char *argv[])
             if (data_size == 0) {
                 // File read complete
                 is_last_packet = true;
-                // Don't forget to release memory.
-                // 通知接收端结束
                 Packet end_packet;
                 end_packet.type = END_OF_TRANSMISSION;
                 end_packet.seq_num = next_seq_num;
@@ -516,54 +491,43 @@ int main(int argc, char *argv[])
                 std::vector<char> end_packet_data = serialize_packet(end_packet, nullptr);
                 sendto(sockfd, end_packet_data.data(), end_packet_data.size(), 0, (struct sockaddr*)&servaddr, len);
                 
-                // 记录发送时间，构建timeout_table。
+                // build timeout_table
                 struct timeval send_time;
                 gettimeofday(&send_time, NULL);
                 timeout_table[next_seq_num] = send_time;
-                // 存入缓存
+                // store to the buffer
                 fly_packets[next_seq_num] = end_packet_data;
                 delete[] data_buffer;
-                //  std::cout << "文件读取完成" << std::endl;
-                // break;
             } else {
                 Packet packet;
                 packet.type = DATA_PACKET;
                 packet.seq_num = next_seq_num;
                 packet.size = data_size;
                 packet.crc32 = calculate_CRC32(data_buffer, data_size);
-                // 发送端
-                //  std::cout << "发送新包，包号" << packet.seq_num << ", Size = " << data_size << ", CRC32 = " << packet.crc32 << std::endl;
 
-                // 序列化
                 std::vector<char> serialized_data = serialize_packet(packet, data_buffer);
                 
-                // 发送数据
                 ssize_t sent_size = sendto(sockfd, serialized_data.data(), serialized_data.size(),
                                             0, (struct sockaddr*)&servaddr, len);
                 
                 if (sent_size < 0) {
+                    // std::cerr << "sendto failed: " << strerror(errno) << std::endl;
                     if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                        std::cerr << "发送失败，发送缓冲区已满，将稍后重试" << std::endl;
-                        // 可以在此处等待一段时间，或者记录需要重传的包，稍后再尝试发送
-                        delete[] data_buffer;
+                        std::cerr << "Sent buffer is full. Please wait..." << std::endl;
+                        usleep(100 * timeout);
                         // usleep(100000);
-                        continue;
                     } else {
-                        std::cerr << "发送失败，错误信息：" << strerror(errno) << std::endl;
-                        delete[] data_buffer;
+                        std::cerr << "Failed sent, error info：" << strerror(errno) << std::endl;
                         return -1;
                     }
                 }
 
-                // 记录发送时间，构建timeout_table。
                 struct timeval send_time;
                 gettimeofday(&send_time, NULL);
                 timeout_table[next_seq_num] = send_time;
 
-                // 存入缓存
                 fly_packets[next_seq_num] = serialized_data;
 
-                // Never forgot delete[]
                 delete[] data_buffer;
                 next_seq_num++;
             }
@@ -571,15 +535,15 @@ int main(int argc, char *argv[])
         }
 
         struct epoll_event events[1];
-        int nfds = epoll_wait(epfd, events, 1, 0);
-        //  std::cout << "epoll_wait return result:" << nfds << std::endl;
+        int nfds = epoll_wait(epfd, events, 1, timeout);
+        std::cout << "epoll_wait return value:" << nfds << std::endl;
         if (nfds == -1) {
             std::cerr << "Error in epoll_wait: " << strerror(errno) << std::endl;
             close(sockfd);
             close(epfd);
             return -1;
         } else if (nfds == 0) {
-            // 超时重新传。
+            // Timeout and retransmit
             for (auto ite = fly_packets.begin(); ite != fly_packets.end(); ite++) {
                 timeval now;
                 gettimeofday(&now, NULL);
@@ -588,62 +552,45 @@ int main(int argc, char *argv[])
                 long elasped_time = (now.tv_sec - send_time.tv_sec) * 1000 +
                                     (now.tv_usec - send_time.tv_usec) / 1000;
                 if (elasped_time >= timeout) {
-                    // 超时了，重传数据包
+
                     resent_count++;
                     ssize_t sent_size = sendto(sockfd, ite->second.data(), ite->second.size(),
                                         0, (struct sockaddr*)&servaddr, len);
                     if (sent_size < 0) {
+                        // std::cerr << "sendto failed: " << strerror(errno) << std::endl;
                         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                            std::cerr << "重传失败，发送缓冲区已满，将稍后重试" << std::endl;
+                            timeout++;
+                            std::cerr << "Sent buffer is full, Please Wait ..." << std::endl;
+                            usleep(100 * timeout);
                             // usleep(100000);
-                            // 可以在此处等待一段时间，或者记录需要重传的包，稍后再尝试发送
-                            continue; // 继续下一次循环，稍后重试
                         } else {
-                            std::cerr << "重传失败，错误信息：" << strerror(errno) << std::endl;
+                            std::cerr << "Fail to retransmit, Error info：" << strerror(errno) << std::endl;
                             close(sockfd);
                             close(epfd);
                             return -1;
                         }
                     }
-                    // 重传后立刻更新timeout_table
+                    // update timeout_table after retransmit
                     gettimeofday(&timeout_table[seq], NULL);
-                    //  std::cout << "elasped_time" << elasped_time << " Resent Packet, Seq Num: " << seq << std::endl;
-                } else {
-                    // break;
                 }
             }
         } else {
-            // 收到了ACK
+            // Get an ACK
             if (events[0].events & EPOLLIN) {
-                // 套接字可读，处理读事件
-                // 收到ACK
                 ssize_t count = 0;
-                // 这里应该能容下一个大的变长的ACK
                 std::vector<char> ack_buffer(MTU);
                 std::vector<std::pair<int,int>> missing_intervals;
                 missing_intervals.clear();
-                // 这里不能是while？不然可能接到不对的部分？
                 while((count = recvfrom(sockfd, ack_buffer.data(), ack_buffer.size(), 0, (struct sockaddr *)&servaddr, &len)) > 0) {
-                    
-                    // std::cout << "recvfrom接到ACK，ackbuffer_size：" << ack_buffer.size() << "count:" << count << std::endl;
-                    // std::cout << "count:" << count << std::endl;
-                    // ack_buffer.resize(count);
-                    // 反序列化
+                    std::cout << "进入while循环得到recvfrom返回的count：" << count << std::endl;
                     ack = deserialize_Ack(ack_buffer, missing_intervals);
-                    
+                    std::cout << "收到的ACK的interval count:" << ack.interval_count << std::endl; 
+                    std::cout << "收到的ACK的aced:" << ack.acked << std::endl;
                     if (ack.type == ACK_PACKET) {
-                        //  std::cout << "收到了ACK，ACK确认的是acked:" << ack.acked << std::endl;
-                        //  std::cout << "缺失的区间数量:" << ack.interval_count << std::endl;
-                        //  std::cout << "旧的Base值（窗口左侧）:" << base << std::endl;
-                        //  std::cout << "下一个要发的新包号" << next_seq_num << std::endl;
-                        //  std::cout << "收到的missing 区间" << std::endl;
-                        // for(const auto& interval : missing_intervals) {
-                        //      std::cout << "(" << interval.first << "," << interval.second << ")" << std::endl;
-                        // }
 
-                        // 更新窗口
+                        // Update window left bound
                         if (ack.acked >= base) {
-                            // 移除已确认的数据包
+                            // erase the packet which are acked.
                             for(int seq = base; seq <= ack.acked; seq++) {
                                 fly_packets.erase(seq);
                                 timeout_table.erase(seq);
@@ -654,14 +601,14 @@ int main(int argc, char *argv[])
                         if (ack.interval_count > 0) {
                             struct timeval now;
                             gettimeofday(&now, NULL);
-                            // 处理缺失的区间
+                            // deal with missing interval
                             for (const auto& interval : missing_intervals) {
                                 for (int seq = interval.first; seq <= interval.second; seq++) {
                                     timeval send_time = timeout_table[seq];
                                     long elasped_time = (now.tv_sec - send_time.tv_sec) * 1000 +
                                                         (now.tv_usec - send_time.tv_usec) / 1000;
-                                    if (seq >= base && seq < next_seq_num && elasped_time > 1000) {
-                                        // 重发单个包。仅超时时重发
+                                    if (seq >= base && seq < next_seq_num && elasped_time > timeout) {
+                                        // resend single packet.
                                         resent_count++;
                                         resend_packet(sockfd, servaddr, len, seq, fly_packets, timeout_table);
                                     }
@@ -670,7 +617,6 @@ int main(int argc, char *argv[])
                         }
                     
                     } else if (ack.type == END_OF_TRANSMISSION) {
-                        // 结束！
                         trans_finish = true;
                     }
 
@@ -685,18 +631,16 @@ int main(int argc, char *argv[])
     file.close();
     close(sockfd);
     close(epfd);
-    std::cout << "文件传输完成" << std::endl;
+    std::cout << "File tranmission Complete!" << std::endl;
 
-    //下方5行代码：获取并持久化程序结束的时刻，并计算速率
     auto end = std::chrono::system_clock::now();
     auto duration2 = end.time_since_epoch();
     auto end_millis = std::chrono::duration_cast<std::chrono::milliseconds>(duration2).count();
     std::string transfering_duration_millis_str = std::to_string(end_millis - begin_millis);
     double bandwidth = (filesize * 8.0) / ((end_millis - begin_millis) / 1000.0) / 1e6;
 
-    std::cout << "客户端已经发完整个文件并确认！文件大小：" << filesize / 1000 / 1000 <<  "MiB！用时：" << transfering_duration_millis_str << "毫秒！平均速率：" << bandwidth << "Mib/s！总共重传包数：" << resent_count << std::endl;
+    std::cout << "File size：" << filesize / 1000 / 1000 <<  "MiB！Time cost：" << transfering_duration_millis_str << "毫秒！平均速率：" << bandwidth << "Mib/s！总共重传包数：" << resent_count << std::endl;
     std::cout << "Retransmissions:" << resent_count << std::endl;
-    std::cout << "File transfer completed. Sent END signal." << std::endl;
 
     return 0;
 }
