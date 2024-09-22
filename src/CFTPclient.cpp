@@ -262,7 +262,7 @@ void resend_packet(int sockfd, struct sockaddr_in& servaddr, socklen_t len, int 
         // std::cerr << "sendto failed: " << strerror(errno) << std::endl;
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             std::cerr << "Sent buffer is full, Waiting..." << std::endl;
-            usleep(100 * timeout);
+            usleep(1000);
         } else {
             std::cerr << "Resent failed, error info：" << strerror(errno) << std::endl;
         }
