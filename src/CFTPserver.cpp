@@ -222,7 +222,7 @@ void send_ack(int sockfd, struct sockaddr_in& cliaddr, socklen_t len, int acked_
         return ;
     }
 
-    std::cout << "Sent ACK，Accumu acked Seq: " << ack.acked << " sent_size: " << sent_size << std::endl;
+    // std::cout << "Sent ACK，Accumu acked Seq: " << ack.acked << " sent_size: " << sent_size << std::endl;
     if (ack.interval_count > 0) {
          std::cout << "，Missing Intervals Count: " << ack.interval_count;
         for (const auto& interval : missing_intervals) {
@@ -585,6 +585,7 @@ int main(int argc, char* argv[]) {
             }
         }
     }
+    std::cout << "File Received." << std::endl;
 
     file.close();
     close(sockfd);

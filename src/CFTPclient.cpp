@@ -582,10 +582,10 @@ int main(int argc, char *argv[])
                 std::vector<std::pair<int,int>> missing_intervals;
                 missing_intervals.clear();
                 if((count = recvfrom(sockfd, ack_buffer.data(), ack_buffer.size(), 0, (struct sockaddr *)&servaddr, &len)) > 0) {
-                    std::cout << "进入while循环得到recvfrom返回的count：" << count << std::endl;
+                    std::cout << "while recvfrom count：" << count << std::endl;
                     ack = deserialize_Ack(ack_buffer, missing_intervals);
-                    std::cout << "收到的ACK的interval count:" << ack.interval_count << std::endl; 
-                    std::cout << "收到的ACK的aced:" << ack.acked << std::endl;
+                    std::cout << "interval count:" << ack.interval_count << std::endl; 
+                    std::cout << "ACK acked:" << ack.acked << std::endl;
                     if (ack.type == ACK_PACKET) {
 
                         // Update window left bound
@@ -639,8 +639,7 @@ int main(int argc, char *argv[])
     std::string transfering_duration_millis_str = std::to_string(end_millis - begin_millis);
     double bandwidth = (filesize * 8.0) / ((end_millis - begin_millis) / 1000.0) / 1e6;
 
-    std::cout << "File size：" << filesize / 1000 / 1000 <<  "MiB！Time cost：" << transfering_duration_millis_str << "毫秒！平均速率：" << bandwidth << "Mib/s！总共重传包数：" << resent_count << std::endl;
-    std::cout << "Retransmissions:" << resent_count << std::endl;
+    std::cout << "File size：" << filesize / 1000 / 1000 <<  "MiB！Time cost：" << transfering_duration_millis_str << "ms！Average Speed：" << bandwidth << "Mib/s！Retransmission：" << resent_count << std::endl;
 
     return 0;
 }
