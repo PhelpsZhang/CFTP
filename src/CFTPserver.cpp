@@ -2,7 +2,7 @@
 
 // 定义服务器的最大传输单元（MTU）和每个数据块的大小
 #define MAX_PACKET_SIZE 1400
-#define WINDOW_SIZE 4000  // 滑动窗口的大小
+#define WINDOW_SIZE 2000  // 滑动窗口的大小
 #define TIMEOUT 10 // ms
 
 enum MessageType {
@@ -18,6 +18,7 @@ struct HandshakeMessage {
     MessageType type;
     int window_size;
     int mtu;
+    int64_t file_size;
     int file_name_length;  // 文件名长度
 };
 
@@ -68,6 +69,7 @@ std::vector<char> serialize_Ack(const Ack& ack, const std::vector<std::pair<int,
         int start_network = htonl(interval.first);
         int end_network = htonl(interval.second);
 
+        // std::cout << "Serializing, start: " << interval.first << ", end: " << interval.second << std::endl; // 调试信息
         memcpy(buffer.data() + offset, &start_network, sizeof(int));
         offset += sizeof(int);
 
@@ -82,7 +84,7 @@ std::vector<char> serialize_Ack(const Ack& ack, const std::vector<std::pair<int,
 Packet deserialize_packet(const std::vector<char>& buffer, char*& data) {
     Packet packet;
     size_t offset = 0;
-
+    
     // 反序列化 type
     int type_network;
     memcpy(&type_network, buffer.data() + offset, sizeof(int));
@@ -120,7 +122,7 @@ Packet deserialize_packet(const std::vector<char>& buffer, char*& data) {
 
 // 序列化HandShakeMessage
 std::vector<char> serialize_handshake(const HandshakeMessage& msg, const std::string& file_name) {
-    size_t total_size = sizeof(int) * 4 + file_name.size();
+    size_t total_size = sizeof(int) * 4 + sizeof(int64_t) + file_name.size();
     std::vector<char> buffer(total_size);
 
     size_t offset = 0;
@@ -139,6 +141,11 @@ std::vector<char> serialize_handshake(const HandshakeMessage& msg, const std::st
     int mtu_network = htonl(msg.mtu);
     memcpy(buffer.data() + offset, &mtu_network, sizeof(int));
     offset += sizeof(int);
+
+    // 序列化 file_size
+    int64_t file_size_network = htonl(msg.file_size);
+    memcpy(buffer.data() + offset, &file_size_network, sizeof(int64_t));
+    offset += sizeof(int64_t);
 
     // 序列化 file_name_length
     int file_name_length_network = htonl(file_name.size());
@@ -173,6 +180,12 @@ HandshakeMessage deserialize_handshake(const std::vector<char>& buffer, std::str
     memcpy(&mtu_network, buffer.data() + offset, sizeof(int));
     msg.mtu = ntohl(mtu_network);
     offset += sizeof(int);
+
+    // 反序列化 file_size
+    int64_t file_size_network;
+    memcpy(&file_size_network, buffer.data() + offset, sizeof(int64_t));
+    msg.file_size = ntohl(file_size_network);
+    offset += sizeof(int64_t);
 
     // 反序列化 file_name_length
     int file_name_length_network;
@@ -216,7 +229,7 @@ void send_ack(int sockfd, struct sockaddr_in& cliaddr, socklen_t len, int acked_
     ack.type = ACK_PACKET;
     ack.acked = acked_num;
     ack.interval_count = missing_intervals.size();
-
+    
     // 序列化 ACK
     std::vector<char> serialized_ack = serialize_Ack(ack, missing_intervals);
 
@@ -227,14 +240,14 @@ void send_ack(int sockfd, struct sockaddr_in& cliaddr, socklen_t len, int acked_
         return ;
     }
 
-    std::cout << "Sent ACK，Accumu acked Seq: " << ack.acked << std::endl;
-    if (ack.interval_count > 0) {
-        std::cout << "，Missing Intervals Count: " << ack.interval_count;
-        for (const auto& interval : missing_intervals) {
-            std::cout << " (" << interval.first << ", " << interval.second << ")";
-        }
-    }
-    std::cout << std::endl;
+    //  std::cout << "Sent ACK，Accumu acked Seq: " << ack.acked << " sent_size: " << sent_size << std::endl;
+    // if (ack.interval_count > 0) {
+    //      std::cout << "，Missing Intervals Count: " << ack.interval_count;
+    //     for (const auto& interval : missing_intervals) {
+    //          std::cout << " (" << interval.first << ", " << interval.second << ")";
+    //     }
+    // }
+    //  std::cout << std::endl;
 }
 
 /**
@@ -335,8 +348,8 @@ int main(int argc, char* argv[]) {
     // 当前成功收到的最大序列号
     int max_received_num = 0;
 
-    bool is_last_received = false;
     bool trans_finish = false;
+    long filesize;
 
     // receiver window, x[seq] = data 。缓存收到的data数据。
     std::map<int, std::vector<char>> recv_buffer;
@@ -371,7 +384,7 @@ int main(int argc, char* argv[]) {
     while (!handshake_finish) {
         struct epoll_event events[1];
         // Blocking wait
-        int nfds = epoll_wait(epfd, events, 1, -1);
+        int nfds = epoll_wait(epfd, events, 1, timeout);
         if (nfds == -1) {
             perror("epoll_wait失败");
             close(sockfd);
@@ -381,7 +394,7 @@ int main(int argc, char* argv[]) {
 
         if (events[0].events & EPOLLIN) {
             // 接收握手请求
-            std::vector<char> buffer(1024);
+            std::vector<char> buffer(MAX_PACKET_SIZE);
             ssize_t recv_size = recvfrom(sockfd, buffer.data(), buffer.size(), 0,
                                          (struct sockaddr*)&cliaddr, &len);
             if (recv_size > 0) {
@@ -389,10 +402,14 @@ int main(int argc, char* argv[]) {
                 HandshakeMessage hs_req = deserialize_handshake(buffer, file_name_str);
                 if (hs_req.type == HANDSHAKE_REQUEST) {
                     // 接到握手req，文件名已知
-                    std::cout << "接收到握手请求，文件名：" << file_name_str << "MTU:" << hs_req.mtu <<std::endl;
-                    
+                    //  std::cout << "接收到握手请求，文件名：" << file_name_str << "MTU:" << hs_req.mtu <<std::endl;
+
                     agreed_mtu = hs_req.mtu;
                     timeout = agreed_mtu;
+                    filesize = hs_req.file_size;
+
+                    std::cout << "Handshake Connect, filename: " << file_name_str << std::endl;
+                    std::cout << "Filesize: " << filesize << " agreed_mtu" << agreed_mtu << std::endl;
                     
                     // decide a mtu
 
@@ -409,21 +426,25 @@ int main(int argc, char* argv[]) {
                     hs_resp.window_size = WINDOW_SIZE;
                     hs_resp.file_name_length = 0;
                     hs_resp.mtu = agreed_mtu;
+                    hs_resp.file_size = filesize;
 
                     std::vector<char> hs_resp_data = serialize_handshake(hs_resp, "");
                     sendto(sockfd, hs_resp_data.data(), hs_resp_data.size(), 0,
                            (struct sockaddr*)&cliaddr, len);
-                    std::cout << "发送握手响应" << std::endl;
+                    //  std::cout << "发送握手响应" << std::endl;
                     handshake_finish = true;
+                    
                 }
             }
         }
     }
 
+    int ack_header_size = sizeof(int) * 3;
 
     // 引入时间控制变量
     auto last_SACK_time = std::chrono::steady_clock::now();
     const std::chrono::milliseconds ack_interval(timeout); // 500 毫秒
+    bool receive_END = false;
 
     while (!trans_finish) {
         // 使用epoll等待事件
@@ -437,8 +458,25 @@ int main(int argc, char* argv[]) {
         } else if (nfds == 0) {
             // epoll_wait 超时
             std::vector<std::pair<int, int>> missing_intervals;
+            missing_intervals.clear();
+            if (receive_END == true && expected_seq_num * agreed_mtu >= filesize) {
+                Ack ack;
+                ack.type = END_OF_TRANSMISSION;
+                ack.acked = expected_seq_num;
+                ack.interval_count = 0;
+                // 序列化 ACK
+                std::vector<char> serialized_ack = serialize_Ack(ack, missing_intervals);
+                // 发送 ACK
+                ssize_t sent_size = sendto(sockfd, serialized_ack.data(), serialized_ack.size(), 0, (struct sockaddr*)&cliaddr, len);
+                if (sent_size < 0) {
+                    perror("发送ACK失败");
+                }
+                trans_finish = true;
+                continue;
+            }
+
             if (expected_seq_num >= max_received_num) {
-                // 一般情况，发个ACK刺激一下
+                // 一般情况，发个ACK刺激一下。interval?
                 // 此处missing_intervals为空。
                 send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
             } else {
@@ -455,7 +493,19 @@ int main(int argc, char* argv[]) {
                     missing_intervals.emplace_back(corrupted_seq, corrupted_seq);
                 }
                 missing_intervals = merge_intervals(missing_intervals);
-                send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
+                int interval_size = sizeof(int) * 2;
+                int max_intervals = (agreed_mtu - ack_header_size) / (interval_size * 2); // 直接一半，冗余给序列化变化
+                int total_intervals = missing_intervals.size();
+                int sent_intervals = 0;
+                // 分批发送缺失区间
+                for (size_t i = 0; i < total_intervals; i += max_intervals) {
+                    // 截取当前批次的缺失区间
+                    auto end_it = std::min(missing_intervals.begin() + i + max_intervals, missing_intervals.end());
+                    std::vector<std::pair<int, int>> current_intervals(missing_intervals.begin() + i, end_it);
+
+                    send_ack(sockfd, cliaddr, len, expected_seq_num-1, current_intervals);
+                }
+                missing_intervals.clear();
                 last_SACK_time = std::chrono::steady_clock::now();   
             }
         } else {
@@ -470,16 +520,14 @@ int main(int argc, char* argv[]) {
                     // 反序列化
                     char *data = nullptr;
                     Packet packet = deserialize_packet(buffer, data);
-                    std::cout << "监听接到了数据" << std::endl;
-
+                    //  std::cout << "监听接到了数据" << std::endl;
                     std::vector<std::pair<int,int>> missing_intervals;
                     
                     if (packet.type == DATA_PACKET) {
-                        std::cout << "接到了数据包，包号 Seq Num: " << packet.seq_num << std::endl;
+                        //  std::cout << "接到了数据包，包号 Seq Num: " << packet.seq_num << std::endl;
                         // 校验CRC32
                         uint32_t crc32_calculated = calculate_CRC32(data, packet.size);
-                        std::cout << "Receiver: Seq Num = " << packet.seq_num << ", Data Size = " << packet.size << ", Received CRC32 = " << packet.crc32 << ", Calculated CRC32 = " << crc32_calculated << std::endl;
-                        
+                        //  std::cout << "Receiver: Seq Num = " << packet.seq_num << ", Data Size = " << packet.size << ", Received CRC32 = " << packet.crc32 << ", Calculated CRC32 = " << crc32_calculated << std::endl;
                         if (packet.crc32 == crc32_calculated) {
                             // 校验成功
                             // 如果该序列号之前就已经在wrong_seqs_set中了，移除它
@@ -497,7 +545,7 @@ int main(int argc, char* argv[]) {
                                     // 找到了期待的下一个seq号。
                                     // 没检查连续
                                     file.write(recv_buffer[expected_seq_num].data(), recv_buffer[expected_seq_num].size());
-                                    std::cout << "Write the packet to file, Seq Num: " << expected_seq_num << std::endl;
+                                    //  std::cout << "Write the packet to file, Seq Num: " << expected_seq_num << std::endl;
                                     // 移除已经写入的包
                                     recv_buffer.erase(expected_seq_num);
                                     expected_seq_num++;
@@ -527,8 +575,21 @@ int main(int argc, char* argv[]) {
                                             missing_intervals.emplace_back(corrupted_seq, corrupted_seq);
                                         }
                                         missing_intervals = merge_intervals(missing_intervals);
-                                        send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
-                                        last_SACK_time = std::chrono::steady_clock::now();   
+                                        // std::cout << "missing_intervals里有多少个pair" << missing_intervals.size() << std::endl;
+                                        int interval_size = sizeof(int) * 2;
+                                        int max_intervals = (agreed_mtu - ack_header_size) / (interval_size * 2); // 直接一半，冗余给序列化变化
+                                        int total_intervals = missing_intervals.size();
+                                        int sent_intervals = 0;
+                                        // 分批发送缺失区间
+                                        for (size_t i = 0; i < total_intervals; i += max_intervals) {
+                                            // 截取当前批次的缺失区间
+                                            auto end_it = std::min(missing_intervals.begin() + i + max_intervals, missing_intervals.end());
+                                            std::vector<std::pair<int, int>> current_intervals(missing_intervals.begin() + i, end_it);
+
+                                            send_ack(sockfd, cliaddr, len, expected_seq_num-1, current_intervals);
+                                        }
+                                        missing_intervals.clear();
+                                        last_SACK_time = std::chrono::steady_clock::now(); 
                                     }
                                     // 不超时就不管，丢给超时重传来处理。
                                 }
@@ -546,16 +607,26 @@ int main(int argc, char* argv[]) {
                             missing_intervals.emplace_back(packet.seq_num, packet.seq_num);
                             send_ack(sockfd, cliaddr, len, packet.seq_num - 1, missing_intervals);
                         }
-                    } else if (packet.type == END_OF_TRANSMISSION) {
-                        std::cout << "Receive End Information." << std::endl;
-                        is_last_received = true;
-                        // 直接一个简单的ACK
-                        send_ack(sockfd, cliaddr, len, expected_seq_num - 1, missing_intervals);
+                    } else if (packet.type == END_OF_TRANSMISSION){
+                        if (packet.seq_num == expected_seq_num) {
+                            receive_END = true;
+                            // 接收完了，结束
+                            // 直接一个简单的ACK
+                            Ack ack;
+                            ack.type = END_OF_TRANSMISSION;
+                            ack.acked = expected_seq_num;
+                            ack.interval_count = 0;
+                            // 序列化 ACK
+                            std::vector<char> serialized_ack = serialize_Ack(ack, missing_intervals);
+                            // 发送 ACK
+                            ssize_t sent_size = sendto(sockfd, serialized_ack.data(), serialized_ack.size(), 0, (struct sockaddr*)&cliaddr, len);
+                            if (sent_size < 0) {
+                                perror("发送ACK失败");
+                            }
+                        }
+                        
                     }
 
-                    if (is_last_received && recv_buffer.empty()) {
-                        trans_finish = true;
-                    }
                     delete[] data;
 
                 }
