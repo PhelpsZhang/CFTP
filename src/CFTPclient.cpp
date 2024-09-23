@@ -501,10 +501,11 @@ int main(int argc, char *argv[])
 
                 fly_packets[next_seq_num] = serialized_data;
 
-                delete[] data_buffer;
                 next_seq_num++;
             }
-            
+            if (data_buffer != nullptr) {
+                delete[] data_buffer;
+            }
         }
 
         int nfds = epoll_wait(epfd, events, 1, timeout);

@@ -563,7 +563,9 @@ int main(int argc, char* argv[]) {
                         }
                         
                     }
-
+                    if (data != nullptr) {
+                        delete[] data;
+                    }
                 }
             }
         }
@@ -607,6 +609,9 @@ int main(int argc, char* argv[]) {
                 Packet packet = deserialize_packet(buffer, data);
                 if (packet.type == END_OF_TRANSMISSION) {
                     condition = false;
+                }
+                if (data != nullptr) {
+                    delete[] data;
                 }
             }
         }
