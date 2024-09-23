@@ -358,7 +358,7 @@ int main(int argc, char* argv[]) {
 
     // control time
     auto last_SACK_time = std::chrono::steady_clock::now();
-    const std::chrono::milliseconds ack_interval(timeout * WINDOW_SIZE / 2);
+    const std::chrono::milliseconds ack_interval(timeout);
 
     // whether receive END or not.
     bool transfer_result = true;
@@ -500,12 +500,12 @@ int main(int argc, char* argv[]) {
                                 }
                                 if (max_received_num < expected_seq_num) max_received_num = expected_seq_num;
                                 // ACK
-                                std::cout << "接到按顺序packet，seq:"<<packet.seq_num<<"发送ACK" << std::endl;
+                                // std::cout << "接到按顺序packet，seq:"<<packet.seq_num<<"发送ACK" << std::endl;
                                 send_ack(sockfd, cliaddr, len, packet.seq_num, missing_intervals);
 
                             } else if (packet.seq_num > expected_seq_num) {
                                 // higher than expect. store it to buffer.
-                                std::cout << "提前接到后面的packet, seq:" << packet.seq_num << std::endl;
+                                // std::cout << "提前接到后面的packet, seq:" << packet.seq_num << std::endl;
                                 if (recv_buffer.find(packet.seq_num) == recv_buffer.end()) {
                                     recv_buffer[packet.seq_num] = std::vector<char>(data, data + packet.size);
                                     if (packet.seq_num > max_received_num) {
@@ -542,7 +542,7 @@ int main(int argc, char* argv[]) {
                             } else {
                                 // expect_num > packet.seq_num
                                 // The previous ACK may loss
-                                std::cout << "收到了已经ack过的packet(ACK丢失), seq:" << packet.seq_num << std::endl;
+                                // std::cout << "收到了已经ack过的packet(ACK丢失), seq:" << packet.seq_num << std::endl;
                                 if (std::chrono::steady_clock::now() > last_SACK_time + ack_interval) { 
                                     // 收到以前的expect_num，如果距离上次发送ACK过去超时，则发送。
                                     send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);

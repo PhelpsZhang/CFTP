@@ -507,7 +507,7 @@ int main(int argc, char *argv[])
             
         }
 
-        int nfds = epoll_wait(epfd, events, 1, test_rtt);
+        int nfds = epoll_wait(epfd, events, 1, timeout);
         std::cout << "epoll_wait return value:" << nfds << std::endl;
         if (nfds == -1) {
             std::cerr << "Error in epoll_wait: " << strerror(errno) << std::endl;
@@ -519,25 +519,25 @@ int main(int argc, char *argv[])
         
             timeval now;
             gettimeofday(&now, NULL);
-            // if (update_ite_flag == true || ite == fly_packets.end()) {
-            //     ite = fly_packets.begin();
-            //     update_ite_flag = false;
-            // }
+            if (update_ite_flag == true || ite == fly_packets.end()) {
+                ite = fly_packets.begin();
+                update_ite_flag = false;
+            }
 
-            // int seq = ite->first;
-            // timeval send_time = timeout_table[seq];
-            // // std::cout << "seq"<< seq << " before timeout_table" << send_time.tv_sec*1000 + send_time.tv_usec/1000 << std::endl;
-            // long elasped_time = (now.tv_sec - send_time.tv_sec) * 1000 +
-            //                          (now.tv_usec - send_time.tv_usec) / 1000;
-            // std::cout << "elasped_time:" << elasped_time << " timeout: " << timeout << std::endl;
-            // if (elasped_time >= timeout) {
-            //     resent_count++;
-            //     ssize_t sent_size = sendto(sockfd, ite->second.data(), ite->second.size(),
-            //               0, (struct sockaddr*)&servaddr, len);
+            int seq = ite->first;
+            timeval send_time = timeout_table[seq];
+            // std::cout << "seq"<< seq << " before timeout_table" << send_time.tv_sec*1000 + send_time.tv_usec/1000 << std::endl;
+            long elasped_time = (now.tv_sec - send_time.tv_sec) * 1000 +
+                                     (now.tv_usec - send_time.tv_usec) / 1000;
+            std::cout << "elasped_time:" << elasped_time << " timeout: " << timeout << std::endl;
+            if (elasped_time >= timeout) {
+                resent_count++;
+                ssize_t sent_size = sendto(sockfd, ite->second.data(), ite->second.size(),
+                          0, (struct sockaddr*)&servaddr, len);
             
-            //     gettimeofday(&timeout_table[seq], NULL);
-            // }
-            // ite++;
+                gettimeofday(&timeout_table[seq], NULL);
+            }
+            ite++;
 
             // long interval_of_windowretrans = (now.tv_sec - last_retrans_window.tv_sec) * 1000 +
             //         (now.tv_usec - last_retrans_window.tv_usec) / 1000;
@@ -547,24 +547,24 @@ int main(int argc, char *argv[])
             // std::cout << "Timeout Retrans, Now the fly_packets count: " << fly_packets.size() << std::endl;
             
             
-            for (auto ite = fly_packets.begin(); ite != fly_packets.end(); ite++) {
+            // for (auto ite = fly_packets.begin(); ite != fly_packets.end(); ite++) {
 
-                int seq = ite->first;
-                timeval send_time = timeout_table[seq];
-                // std::cout << "seq"<< seq << " before timeout_table" << send_time.tv_sec*1000 + send_time.tv_usec/1000 << std::endl;
-                long elasped_time = (now.tv_sec - send_time.tv_sec) * 1000 +
-                                    (now.tv_usec - send_time.tv_usec) / 1000;
-                std::cout << "elasped_time:" << elasped_time << " timeout: " << timeout << std::endl;
-                if (elasped_time >= timeout) {
-                    resent_count++;
-                    std::cout << "Timeout Retrans. Seq Num:"<< seq << std::endl;
-                    ssize_t sent_size = sendto(sockfd, ite->second.data(), ite->second.size(),
-                                        0, (struct sockaddr*)&servaddr, len);
-                    // update timeout_table after retransmit
-                    gettimeofday(&timeout_table[seq], NULL);
-                    // std::cout << "seq"<<seq << " new timeout_table" << timeout_table[seq].tv_sec*1000 + timeout_table[seq].tv_usec/1000 << std::endl;
-                }
-            }
+            //     int seq = ite->first;
+            //     timeval send_time = timeout_table[seq];
+            //     // std::cout << "seq"<< seq << " before timeout_table" << send_time.tv_sec*1000 + send_time.tv_usec/1000 << std::endl;
+            //     long elasped_time = (now.tv_sec - send_time.tv_sec) * 1000 +
+            //                         (now.tv_usec - send_time.tv_usec) / 1000;
+            //     // std::cout << "elasped_time:" << elasped_time << " timeout: " << timeout << std::endl;
+            //     if (elasped_time >= timeout) {
+            //         resent_count++;
+            //         std::cout << "Timeout Retrans. Seq Num:"<< seq << std::endl;
+            //         ssize_t sent_size = sendto(sockfd, ite->second.data(), ite->second.size(),
+            //                             0, (struct sockaddr*)&servaddr, len);
+            //         // update timeout_table after retransmit
+            //         gettimeofday(&timeout_table[seq], NULL);
+            //         // std::cout << "seq"<<seq << " new timeout_table" << timeout_table[seq].tv_sec*1000 + timeout_table[seq].tv_usec/1000 << std::endl;
+            //     }
+            // }
             // timeval now2;
             // gettimeofday(&now2, NULL);
             // long test = (now2.tv_sec - now.tv_sec) * 1000 +
@@ -578,10 +578,10 @@ int main(int argc, char *argv[])
                 std::vector<std::pair<int,int>> missing_intervals;
                 missing_intervals.clear();
                 if((count = recvfrom(sockfd, ack_buffer.data(), ack_buffer.size(), 0, (struct sockaddr *)&servaddr, &len)) > 0) {
-                    std::cout << "进入recvfrom返回的count：" << count << std::endl;
+                    // std::cout << "进入recvfrom返回的count：" << count << std::endl;
                     ack = deserialize_Ack(ack_buffer, missing_intervals);
-                    std::cout << "收到的ACK的interval count:" << ack.interval_count << std::endl; 
-                    std::cout << "收到的ACK的aced:" << ack.acked << std::endl;
+                    // std::cout << "收到的ACK的interval count:" << ack.interval_count << std::endl; 
+                    // std::cout << "收到的ACK的aced:" << ack.acked << std::endl;
                     if (ack.type == ACK_PACKET) {
 
                         // Update window left bound
