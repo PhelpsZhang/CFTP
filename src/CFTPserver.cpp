@@ -1,8 +1,10 @@
 #include "CFTPserver.h"
 
-#define MAX_PACKET_SIZE 1400
-#define WINDOW_SIZE 2000  
+#define MAX_PACKET_SIZE 1472
+#define WINDOW_SIZE 1000 
 #define TIMEOUT 10 // ms
+#define MAX_RESEND_TIMES 10   // 10 times resend.
+#define MAX_CONN_WAIT 10000   // 10 sec
 
 enum MessageType {
     HANDSHAKE_REQUEST,
@@ -222,9 +224,9 @@ void send_ack(int sockfd, struct sockaddr_in& cliaddr, socklen_t len, int acked_
         return ;
     }
 
-    // std::cout << "Sent ACK，Accumu acked Seq: " << ack.acked << " sent_size: " << sent_size << std::endl;
+    std::cout << "Sent ACK，Accumu acked Seq: " << ack.acked << " sent_size: " << sent_size << std::endl;
     if (ack.interval_count > 0) {
-         std::cout << "，Missing Intervals Count: " << ack.interval_count;
+        //  std::cout << "，Missing Intervals Count: " << ack.interval_count;
         for (const auto& interval : missing_intervals) {
              std::cout << " (" << interval.first << ", " << interval.second << ")";
         }
@@ -297,10 +299,10 @@ int main(int argc, char* argv[]) {
     }
 
     // set non block socket
-    if (-1 == set_sock_nonblock(sockfd)) {
-        close(sockfd);
-        return -1;
-    }
+    // if (-1 == set_sock_nonblock(sockfd)) {
+    //     close(sockfd);
+    //     return -1;
+    // }
 
     memset(&servaddr, 0, sizeof(servaddr));
     memset(&cliaddr, 0, sizeof(cliaddr));
@@ -351,8 +353,20 @@ int main(int argc, char* argv[]) {
     bool handshake_finish = false;
     std::string file_name_str;
 
+
+    int ack_header_size = sizeof(int) * 3;
+
+    // control time
+    auto last_SACK_time = std::chrono::steady_clock::now();
+    const std::chrono::milliseconds ack_interval(timeout * WINDOW_SIZE / 2);
+
+    // whether receive END or not.
+    bool transfer_result = true;
+    int end_resent_time = 0;
+
+    struct epoll_event events[1];
+
     while (!handshake_finish) {
-        struct epoll_event events[1];
         // Blocking wait
         int nfds = epoll_wait(epfd, events, 1, timeout);
         if (nfds == -1) {
@@ -360,64 +374,80 @@ int main(int argc, char* argv[]) {
             close(sockfd);
             close(epfd);
             return -1;
-        }
+        } else if (nfds == 0) {
+            // nothing receive
+        } else {
+            if (events[0].events & EPOLLIN) {
+                std::vector<char> buffer(MAX_PACKET_SIZE);
+                ssize_t recv_size = recvfrom(sockfd, buffer.data(), buffer.size(), 0,
+                                            (struct sockaddr*)&cliaddr, &len);
+                
+                if (recv_size > 0) {
+                    buffer.resize(recv_size);
+                    // std::cout <<"HS recv_size:" << recv_size << " buffer size:" << buffer.size() << std::endl;
+                    HandshakeMessage hs_req = deserialize_handshake(buffer, file_name_str);
+                    if (hs_req.type == HANDSHAKE_REQUEST) {
 
-        if (events[0].events & EPOLLIN) {
-            std::vector<char> buffer(MAX_PACKET_SIZE);
-            ssize_t recv_size = recvfrom(sockfd, buffer.data(), buffer.size(), 0,
-                                         (struct sockaddr*)&cliaddr, &len);
-            if (recv_size > 0) {
-                buffer.resize(recv_size);
-                HandshakeMessage hs_req = deserialize_handshake(buffer, file_name_str);
-                if (hs_req.type == HANDSHAKE_REQUEST) {
+                        // to be used
+                        agreed_mtu = hs_req.mtu;
+                        filesize = hs_req.file_size;
 
-                    // to be used
-                    agreed_mtu = hs_req.mtu;
-                    timeout = agreed_mtu;
-                    filesize = hs_req.file_size;
+                        std::cout << "Handshake Connect, filename: " << file_name_str << std::endl;
+                        std::cout << "Filesize: " << filesize << " agreed_mtu" << agreed_mtu << std::endl;
+                        
+                        // decide a mtu
 
-                    std::cout << "Handshake Connect, filename: " << file_name_str << std::endl;
-                    std::cout << "Filesize: " << filesize << " agreed_mtu" << agreed_mtu << std::endl;
-                    
-                    // decide a mtu
+                        file.open(file_name_str, std::ios::out | std::ios::binary);
+                        if (!file.is_open()) {
+                            perror("file open fail");
+                            close(sockfd);
+                            return -1;
+                        }
+                        // handshake response
+                        HandshakeMessage hs_resp;
+                        hs_resp.type = HANDSHAKE_RESPONSE;
+                        hs_resp.window_size = WINDOW_SIZE;
+                        hs_resp.file_name_length = 0;
+                        hs_resp.mtu = agreed_mtu;
+                        hs_resp.file_size = filesize;
 
-                    file.open(file_name_str, std::ios::out | std::ios::binary);
-                    if (!file.is_open()) {
-                        perror("file open fail");
-                        close(sockfd);
-                        return -1;
+                        std::vector<char> hs_resp_data = serialize_handshake(hs_resp, "");
+                        bool getdata = false;
+                        while(!getdata) {
+                            sendto(sockfd, hs_resp_data.data(), hs_resp_data.size(), 0,
+                                (struct sockaddr*)&cliaddr, len);
+                            int nfds2 = epoll_wait(epfd, events, 1, timeout);
+                            if (nfds == -1) {
+                                perror("epoll fail");
+                                return -1;
+                            } else if(nfds2 > 0) {
+                                // temporarily deal with.
+                                if (events[0].events & EPOLLIN) {
+                                    std::vector<char> buffer2(MAX_PACKET_SIZE);
+                                    ssize_t recv_size = recvfrom(sockfd, buffer2.data(), buffer2.size(), 0,
+                                                                (struct sockaddr*)&cliaddr, &len);
+                                    
+                                    if (recv_size > 0) {
+                                        buffer2.resize(recv_size);
+                                        HandshakeMessage hs_req = deserialize_handshake(buffer2, file_name_str);
+                                        if (hs_req.type == HANDSHAKE_RESPONSE) {
+                                            handshake_finish = true;
+                                            getdata = true;
+                                        }
+                                    }    
+                                }      
+                            }
+                        } 
                     }
-                    
-                    // handshake response
-                    HandshakeMessage hs_resp;
-                    hs_resp.type = HANDSHAKE_RESPONSE;
-                    hs_resp.window_size = WINDOW_SIZE;
-                    hs_resp.file_name_length = 0;
-                    hs_resp.mtu = agreed_mtu;
-                    hs_resp.file_size = filesize;
-
-                    std::vector<char> hs_resp_data = serialize_handshake(hs_resp, "");
-                    sendto(sockfd, hs_resp_data.data(), hs_resp_data.size(), 0,
-                           (struct sockaddr*)&cliaddr, len);
-                    handshake_finish = true;
-                    
                 }
             }
         }
     }
 
-    int ack_header_size = sizeof(int) * 3;
 
-    // control time
-    auto last_SACK_time = std::chrono::steady_clock::now();
-    const std::chrono::milliseconds ack_interval(timeout);
-
-    // whether receive END or not.
-    bool receive_END = false;
 
     while (!trans_finish) {
-
-        struct epoll_event events[1];
+        // struct epoll_event events[1];
         int nfds = epoll_wait(epfd, events, 1, timeout);
         if (nfds == -1) {
             perror("epoll_wait fail");
@@ -425,65 +455,21 @@ int main(int argc, char* argv[]) {
             close(epfd);
             return -1;
         } else if (nfds == 0) {
-            // epoll_wait timeout
-            std::vector<std::pair<int, int>> missing_intervals;
-            missing_intervals.clear();
-            if (receive_END == true && expected_seq_num * agreed_mtu >= filesize) {
-                Ack ack;
-                ack.type = END_OF_TRANSMISSION;
-                ack.acked = expected_seq_num;
-                ack.interval_count = 0;
-                // 序列化 ACK
-                std::vector<char> serialized_ack = serialize_Ack(ack, missing_intervals);
-                // 发送 ACK
-                ssize_t sent_size = sendto(sockfd, serialized_ack.data(), serialized_ack.size(), 0, (struct sockaddr*)&cliaddr, len);
-                if (sent_size < 0) {
-                    perror("fail to send ACK");
-                }
-                trans_finish = true;
-                continue;
-            }
-
-            if (expected_seq_num >= max_received_num) {
-                // just timeout, so send an ACK.
-                send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
-            } else {
-                // there is a range of packet. send SACK
-                for (int seq = expected_seq_num; seq < expected_seq_num + WINDOW_SIZE && seq <= max_received_num; ++seq) {
-                    if (recv_buffer.find(seq) == recv_buffer.end() && wrong_seqs_set.find(seq) == wrong_seqs_set.end()) {
-                        missing_intervals.emplace_back(seq, seq);
-                    }
-                }
-                // add CRC
-                for (const int& corrupted_seq : wrong_seqs_set) {
-                    missing_intervals.emplace_back(corrupted_seq, corrupted_seq);
-                }
-                missing_intervals = merge_intervals(missing_intervals);
-                int interval_size = sizeof(int) * 2;
-                int max_intervals = (agreed_mtu - ack_header_size) / (interval_size * 2); // 直接一半，冗余给序列化变化
-                size_t total_intervals = missing_intervals.size();
-                // send SACK group by group
-                for (size_t i = 0; i < total_intervals; i += max_intervals) {
-                    // current missing intervals
-                    auto end_it = std::min(missing_intervals.begin() + i + max_intervals, missing_intervals.end());
-                    std::vector<std::pair<int, int>> current_intervals(missing_intervals.begin() + i, end_it);
-
-                    send_ack(sockfd, cliaddr, len, expected_seq_num-1, current_intervals);
-                }
-                missing_intervals.clear();
-                last_SACK_time = std::chrono::steady_clock::now();   
-            }
         } else {
             if (events[0].events & EPOLLIN) {
                 // receive Data Packet
                 std::vector<char> buffer(MAX_PACKET_SIZE);
                 int count = 0;
-                while((count = recvfrom(sockfd, buffer.data(), buffer.size(), 0, (struct sockaddr*)&cliaddr, &len)) > 0) {
+                if((count = recvfrom(sockfd, buffer.data(), buffer.size(), 0, (struct sockaddr*)&cliaddr, &len)) > 0) {
                     buffer.resize(count);
+                    if (count == 44) {
+                        std::cout << "Connection Disconnect Manually." << std::endl;
+                        return -1;
+                    }
                     char *data = nullptr;
+                    // std::cout <<"count:" << count << " buffer size:" << buffer.size() << std::endl;
                     Packet packet = deserialize_packet(buffer, data);
                     std::vector<std::pair<int,int>> missing_intervals;
-                    
                     if (packet.type == DATA_PACKET) {
                         //  std::cout << "Receive data packet, Seq Num: " << packet.seq_num << std::endl;
                         
@@ -492,7 +478,7 @@ int main(int argc, char* argv[]) {
                         //  std::cout << "Receiver: Seq Num = " << packet.seq_num << ", Data Size = " << packet.size << ", Received CRC32 = " << packet.crc32 << ", Calculated CRC32 = " << crc32_calculated << std::endl;
                         if (packet.crc32 == crc32_calculated) {
                             // correct packet
-
+                            // std::cout << "crc32 success" << std::endl;
                             // if it is in wrong_set, erase it.
                             if (wrong_seqs_set.find(packet.seq_num) != wrong_seqs_set.end()) {
                                 wrong_seqs_set.erase(packet.seq_num);
@@ -514,9 +500,12 @@ int main(int argc, char* argv[]) {
                                 }
                                 if (max_received_num < expected_seq_num) max_received_num = expected_seq_num;
                                 // ACK
+                                std::cout << "接到按顺序packet，seq:"<<packet.seq_num<<"发送ACK" << std::endl;
                                 send_ack(sockfd, cliaddr, len, packet.seq_num, missing_intervals);
+
                             } else if (packet.seq_num > expected_seq_num) {
                                 // higher than expect. store it to buffer.
+                                std::cout << "提前接到后面的packet, seq:" << packet.seq_num << std::endl;
                                 if (recv_buffer.find(packet.seq_num) == recv_buffer.end()) {
                                     recv_buffer[packet.seq_num] = std::vector<char>(data, data + packet.size);
                                     if (packet.seq_num > max_received_num) {
@@ -538,6 +527,7 @@ int main(int argc, char* argv[]) {
                                         int max_intervals = (agreed_mtu - ack_header_size) / (interval_size * 2); // 直接一半，冗余给序列化变化
                                         size_t total_intervals = missing_intervals.size();
                                         // group by group
+                                        // 提前接到后面的包，超过了上次发送时间触发超时
                                         for (size_t i = 0; i < total_intervals; i += max_intervals) {
                                             auto end_it = std::min(missing_intervals.begin() + i + max_intervals, missing_intervals.end());
                                             std::vector<std::pair<int, int>> current_intervals(missing_intervals.begin() + i, end_it);
@@ -552,7 +542,12 @@ int main(int argc, char* argv[]) {
                             } else {
                                 // expect_num > packet.seq_num
                                 // The previous ACK may loss
-                                send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
+                                std::cout << "收到了已经ack过的packet(ACK丢失), seq:" << packet.seq_num << std::endl;
+                                if (std::chrono::steady_clock::now() > last_SACK_time + ack_interval) { 
+                                    // 收到以前的expect_num，如果距离上次发送ACK过去超时，则发送。
+                                    send_ack(sockfd, cliaddr, len, expected_seq_num-1, missing_intervals);
+                                    last_SACK_time = std::chrono::steady_clock::now(); 
+                                }
                             }
 
                         } else {
@@ -564,19 +559,7 @@ int main(int argc, char* argv[]) {
                         }
                     } else if (packet.type == END_OF_TRANSMISSION){
                         if (packet.seq_num == expected_seq_num) {
-                            receive_END = true;
-                            // True End.
-                            Ack ack;
-                            ack.type = END_OF_TRANSMISSION;
-                            ack.acked = expected_seq_num;
-                            ack.interval_count = 0;
-
-                            std::vector<char> serialized_ack = serialize_Ack(ack, missing_intervals);
-
-                            ssize_t sent_size = sendto(sockfd, serialized_ack.data(), serialized_ack.size(), 0, (struct sockaddr*)&cliaddr, len);
-                            if (sent_size < 0) {
-                                perror("Faield to send");
-                            }
+                            trans_finish = true;
                         }
                         
                     }
@@ -585,8 +568,55 @@ int main(int argc, char* argv[]) {
             }
         }
     }
-    std::cout << "File Received." << std::endl;
 
+    // Send ACK of END back to sender.
+    bool condition = true;
+
+    Ack ack;
+    ack.type = END_OF_TRANSMISSION;
+    ack.acked = expected_seq_num;
+    ack.interval_count = 0;
+    std::vector<std::pair<int, int>> missing_intervals;
+    missing_intervals.clear();
+    // 序列化 ACK
+    std::vector<char> serialized_ack = serialize_Ack(ack, missing_intervals);
+
+    while (condition) {
+        // 发送 ACK
+        ssize_t sent_size = sendto(sockfd, serialized_ack.data(), serialized_ack.size(), 0, (struct sockaddr*)&cliaddr, len);
+        if (sent_size < 0) {
+            perror("Faield to send");
+        }        
+        int ews = epoll_wait(epfd, events, 1, timeout); 
+        if (ews == -1) {
+            perror("epoll fail");
+            return -1;
+        } else if (ews == 0) {
+            if (end_resent_time > MAX_RESEND_TIMES) {
+                condition = false;
+                transfer_result = false;
+                continue;
+            }
+            end_resent_time++;
+        } else { // get END packet
+            std::vector<char> buffer(MAX_PACKET_SIZE);
+            int count = 0;
+            if((count = recvfrom(sockfd, buffer.data(), buffer.size(), 0, (struct sockaddr*)&cliaddr, &len)) > 0) {
+                buffer.resize(count);
+                char *data = nullptr;
+                Packet packet = deserialize_packet(buffer, data);
+                if (packet.type == END_OF_TRANSMISSION) {
+                    condition = false;
+                }
+            }
+        }
+    }
+
+    if (transfer_result == false) {
+        std::cout << "File Transmission End because of Bad connection." << std::endl;
+    }
+
+    std::cout << "File Received" << std::endl;
     file.close();
     close(sockfd);
     close(epfd);
