@@ -369,7 +369,7 @@ int main(int argc, char *argv[])
 
     bool handshake_finish = false;
     int window_size = WINDOW_SIZE;
-    std::string file_name_str = file_path;
+    std::string file_name_str = getFileName(file_path);
 
     int base = 0;           // Sliding window left bound [)
     int next_seq_num = 0;   // next new packet number to send 
